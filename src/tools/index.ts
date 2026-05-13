@@ -42,7 +42,6 @@ import {
   upsertConversation,
   upsertMessages,
   upsertProject,
-  upsertProjectExtended,
   upsertProjectFiles,
   upsertShare,
 } from '../lib/cache.js';
@@ -100,7 +99,7 @@ async function syncOrg(
     for (const p of projects) {
       try {
         const extended = await getProject(cookies, org.uuid, p.uuid);
-        upsertProjectExtended(org.uuid, extended);
+        upsertProject(org.uuid, extended);
       } catch (err) {
         if (err instanceof SessionExpiredError) throw err;
       }

@@ -569,29 +569,7 @@ export function upsertMessages(convo: ConversationFull): void {
   tx(convo.chat_messages);
 }
 
-export function upsertProject(orgId: string, p: Project): void {
-  db()
-    .prepare(
-      `INSERT INTO projects (uuid, org_id, name, description, is_starred, created_at, updated_at, archived_at, synced_at)
-       VALUES (@uuid, @org_id, @name, @description, @is_starred, @created_at, @updated_at, @archived_at, @synced_at)
-       ON CONFLICT(uuid) DO UPDATE SET
-         name=excluded.name, description=excluded.description, is_starred=excluded.is_starred,
-         updated_at=excluded.updated_at, archived_at=excluded.archived_at, synced_at=excluded.synced_at`,
-    )
-    .run({
-      uuid: p.uuid,
-      org_id: orgId,
-      name: p.name,
-      description: p.description ?? null,
-      is_starred: p.is_starred ? 1 : 0,
-      created_at: p.created_at,
-      updated_at: p.updated_at ?? null,
-      archived_at: p.archived_at ?? null,
-      synced_at: new Date().toISOString(),
-    });
-}
-
-export function upsertProjectExtended(orgId: string, p: ProjectExtended): void {
+export function upsertProject(orgId: string, p: ProjectExtended): void {
   db()
     .prepare(
       `INSERT INTO projects (uuid, org_id, name, description, is_starred, created_at, updated_at, archived_at, synced_at,
@@ -601,8 +579,10 @@ export function upsertProjectExtended(orgId: string, p: ProjectExtended): void {
        ON CONFLICT(uuid) DO UPDATE SET
          name=excluded.name, description=excluded.description, is_starred=excluded.is_starred,
          updated_at=excluded.updated_at, archived_at=excluded.archived_at, synced_at=excluded.synced_at,
-         prompt_template=excluded.prompt_template, is_harmony_project=excluded.is_harmony_project,
-         docs_count=excluded.docs_count, files_count=excluded.files_count`,
+         prompt_template=coalesce(excluded.prompt_template, prompt_template),
+         is_harmony_project=coalesce(excluded.is_harmony_project, is_harmony_project),
+         docs_count=coalesce(excluded.docs_count, docs_count),
+         files_count=coalesce(excluded.files_count, files_count)`,
     )
     .run({
       uuid: p.uuid,
@@ -615,9 +595,9 @@ export function upsertProjectExtended(orgId: string, p: ProjectExtended): void {
       archived_at: p.archived_at ?? null,
       synced_at: new Date().toISOString(),
       prompt_template: p.prompt_template || null,
-      is_harmony_project: p.is_harmony_project ? 1 : 0,
-      docs_count: p.docs_count ?? 0,
-      files_count: p.files_count ?? 0,
+      is_harmony_project: p.is_harmony_project ? 1 : null,
+      docs_count: p.docs_count ?? null,
+      files_count: p.files_count ?? null,
     });
 }
 
