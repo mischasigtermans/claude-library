@@ -32,6 +32,18 @@ function ensureColumns(
   }
 }
 
+function replaceChildren<T>(
+  d: Database.Database,
+  table: string,
+  parentCol: string,
+  parentId: string,
+  rows: T[],
+  inserter: (row: T) => void,
+): void {
+  d.prepare(`DELETE FROM ${table} WHERE ${parentCol} = ?`).run(parentId);
+  for (const row of rows) inserter(row);
+}
+
 function migrateFromHansard(): void {
   if (existsSync(DB_PATH) || !existsSync(LEGACY_DB)) return;
   try {
@@ -364,10 +376,10 @@ function upsertMessageBlocks(msgs: Message[], conversationUuid: string): void {
 
   for (const m of msgs) {
     if (!m.content || m.content.length === 0) continue;
-    db().prepare('DELETE FROM message_blocks WHERE message_uuid = ?').run(m.uuid);
-    m.content.forEach((raw, pos) => {
-      if (!isKnownBlock(raw)) return;
-      const block = raw;
+    const indexedBlocks = m.content
+      .map((raw, pos) => ({ raw, pos }))
+      .filter((entry): entry is { raw: Block; pos: number } => isKnownBlock(entry.raw));
+    replaceChildren(db(), 'message_blocks', 'message_uuid', m.uuid, indexedBlocks, ({ raw: block, pos }) => {
       const blockUuid = `${m.uuid}-${pos}`;
       let text: string | null = null;
       let toolUseId: string | null = null;
@@ -527,15 +539,13 @@ function extractArtifacts(text: string): ExtractedArtifact[] {
 }
 
 function upsertArtifacts(messageUuid: string, conversationUuid: string, createdAt: string, text: string): void {
-  db().prepare('DELETE FROM artifacts WHERE message_uuid = ?').run(messageUuid);
   const artifacts = extractArtifacts(text);
-  if (artifacts.length === 0) return;
   const ins = db().prepare(
     `INSERT OR REPLACE INTO artifacts
        (uuid, message_uuid, conversation_uuid, position, source, identifier, artifact_type, title, content, char_count, line_count, created_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   );
-  for (const a of artifacts) {
+  replaceChildren(db(), 'artifacts', 'message_uuid', messageUuid, artifacts, (a) => {
     ins.run(
       `${messageUuid}-art-${a.position}`,
       messageUuid,
@@ -550,18 +560,16 @@ function upsertArtifacts(messageUuid: string, conversationUuid: string, createdA
       a.content.split('\n').length,
       createdAt,
     );
-  }
+  });
 }
 
 export function upsertMessageFiles(messageUuid: string, files: MessageFile[]): void {
-  db().prepare('DELETE FROM message_files WHERE message_uuid = ?').run(messageUuid);
-  if (files.length === 0) return;
   const ins = db().prepare(
     `INSERT INTO message_files (uuid, message_uuid, file_kind, file_name, thumbnail_url, preview_url,
        primary_color, width, height, created_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   );
-  for (const f of files) {
+  replaceChildren(db(), 'message_files', 'message_uuid', messageUuid, files, (f) => {
     const asset = f.thumbnail_asset ?? {};
     ins.run(
       f.uuid ?? f.file_uuid,
@@ -575,18 +583,18 @@ export function upsertMessageFiles(messageUuid: string, files: MessageFile[]): v
       asset.image_height ?? null,
       f.created_at ?? null,
     );
-  }
+  });
 }
 
 export function upsertMessages(convo: ConversationFull): void {
   const tx = db().transaction((msgs: Message[]) => {
-    db().prepare('DELETE FROM messages WHERE conversation_uuid = ?').run(convo.uuid);
     const ins = db().prepare(
       `INSERT INTO messages (uuid, conversation_uuid, idx, sender, text, created_at,
          parent_uuid, input_mode, stop_reason, truncated, compaction_summary)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
-    msgs.forEach((m, i) => {
+    const indexedMsgs = msgs.map((m, i) => ({ m, i }));
+    replaceChildren(db(), 'messages', 'conversation_uuid', convo.uuid, indexedMsgs, ({ m, i }) => {
       ins.run(
         m.uuid, convo.uuid, m.index ?? i, m.sender, messageText(m), m.created_at,
         m.parent_message_uuid ?? null,
@@ -645,15 +653,13 @@ export function upsertProjectFiles(
   projectUuid: string,
   files: Array<{ uuid: string; file_name?: string; raw: unknown }>,
 ): void {
-  db().prepare('DELETE FROM project_files WHERE project_uuid = ?').run(projectUuid);
-  if (files.length === 0) return;
   const ins = db().prepare(
     'INSERT INTO project_files (uuid, project_uuid, file_name, raw_json, synced_at) VALUES (?, ?, ?, ?, ?)',
   );
   const now = new Date().toISOString();
-  for (const f of files) {
+  replaceChildren(db(), 'project_files', 'project_uuid', projectUuid, files, (f) => {
     ins.run(f.uuid, projectUuid, f.file_name ?? null, JSON.stringify(f.raw), now);
-  }
+  });
 }
 
 export function getProjectCached(nameOrUuid: string): (ProjectWithCount & { prompt_template?: string | null }) | undefined {
@@ -952,13 +958,12 @@ export function listProjectsCached(orgId?: string): ProjectWithCount[] {
 }
 
 export function replaceProjectDocs(projectUuid: string, docs: ProjectDoc[]): void {
+  const ins = db().prepare(
+    'INSERT INTO project_docs (uuid, project_uuid, file_name, content, estimated_tokens, created_at, synced_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+  );
+  const now = new Date().toISOString();
   const tx = db().transaction((items: ProjectDoc[]) => {
-    db().prepare('DELETE FROM project_docs WHERE project_uuid = ?').run(projectUuid);
-    const ins = db().prepare(
-      'INSERT INTO project_docs (uuid, project_uuid, file_name, content, estimated_tokens, created_at, synced_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
-    );
-    const now = new Date().toISOString();
-    for (const d of items) {
+    replaceChildren(db(), 'project_docs', 'project_uuid', projectUuid, items, (d) => {
       ins.run(
         d.uuid,
         projectUuid,
@@ -968,7 +973,7 @@ export function replaceProjectDocs(projectUuid: string, docs: ProjectDoc[]): voi
         d.created_at,
         now,
       );
-    }
+    });
   });
   tx(docs);
 }
