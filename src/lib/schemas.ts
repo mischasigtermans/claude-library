@@ -85,8 +85,8 @@ const ThinkingBlock = z
 const ToolUseBlock = z
   .object({
     type: z.literal('tool_use'),
-    id: z.string().nullish(),
-    name: z.string().nullish(),
+    id: z.string(),
+    name: z.string(),
     input: z.unknown().nullish(),
     integration_name: z.string().nullish(),
     start_timestamp: z.string().nullish(),
@@ -97,7 +97,7 @@ const ToolUseBlock = z
 const ToolResultBlock = z
   .object({
     type: z.literal('tool_result'),
-    tool_use_id: z.string().nullish(),
+    tool_use_id: z.string(),
     name: z.string().nullish(),
     is_error: z.boolean().nullish(),
     content: z
