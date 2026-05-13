@@ -30,11 +30,9 @@ Don't fire for things obviously about the *current* Claude Code session. Don't f
 Default loop when the user wants to recall something from past chats.
 
 1. **Search first.** Call `library_search` with a tight query. 2-4 keywords, FTS5 syntax. Don't dump the whole user query in.
-2. **Read the snippets.** Pick the most relevant 1-3 hits. Hits come in two flavours: `[human]/[assistant]` from chat messages, `[doc]` from project knowledge-base files.
-3. **Drill in:**
-   - For a chat hit, call `library_outline` on the conversation UUID, then `library_get` with bounds around the relevant turns.
-   - For a doc hit, call `library_doc` on the doc UUID for the full file.
-4. **Pull only what's needed.** Don't fetch the full transcript when 5 messages will do. Don't dump a whole doc when the snippet already answers.
+2. **Read the snippets.** Pick the most relevant 1-3 hits. Hits come in sections: `[human]/[assistant]` from messages, `[doc]` from project knowledge-base files, `[memory #N]` from memory snapshots, `[artifact]` from code blocks.
+3. **Drill in.** For any hit with a UUID, call `library_open <uuid>` to read the full item. For conversations, call `library_outline` first, then `library_open` with `from`/`to` bounds.
+4. **Pull only what's needed.** Don't fetch the full transcript when 5 messages will do.
 5. **Answer the user.** Quote the relevant passage. Cite the conversation title or doc filename, plus date.
 
 If `library_search` returns nothing, call `library_list` to see what's cached. The user may need to sync.
@@ -75,25 +73,30 @@ Sync is incremental by default. It pulls conversation metadata for every page an
 
 Call `library_list` with `limit` and optional `project`. Default limit 25. Print the table.
 
-### `search <query>`
+### `search <query> [--kind KIND]`
 
-Call `library_search` with the query. Print hits.
+Call `library_search` with the query. Optionally pass `kind` to restrict to one source:
 
-### `projects`
+- `all` (default) — messages, docs, memory, artifacts
+- `messages` — conversation message bodies only
+- `docs` — project knowledge-base documents only
+- `memory` — organization memory snapshots (no query = list all snapshots)
+- `artifacts` — extracted code blocks and antArtifact tags
+- `tool_calls` — tool invocations (query matches tool name)
+- `citations` — web citations (query matches title, URL, site name)
+- `shares` — shared conversation snapshots
 
-Call `library_projects`. Print the list with conversation counts.
+### `projects [--name NAME] [--detail]`
+
+Call `library_projects`. With no args, lists all projects with conversation counts. With `name=X`, filters to one project. With `name=X detail=true`, returns the full record including system prompt.
 
 ### `outline <uuid>`
 
 Call `library_outline`. Print the outline.
 
-### `get <uuid> [from] [to]`
+### `open <uuid> [from] [to]`
 
-Call `library_get` with the bounds. Print the transcript.
-
-### `doc <uuid>`
-
-Call `library_doc`. Print the full document body. Use this for `[doc]` hits returned by `library_search`.
+Call `library_open`. Detects what kind of item the UUID belongs to (conversation, doc, artifact, share, or memory snapshot) and returns the appropriate content. For conversations, `from`/`to` bound the message range.
 
 ### Unknown action
 
@@ -102,17 +105,18 @@ Print:
 Common moves:
   library sync                   pull new and updated conversations
   library list                   show cached conversations
-  library search <query>         full-text search across messages and project docs
+  library search <query>         full-text search across messages, docs, memory, artifacts
+  library search <query> kind=X  restrict to one source (messages/docs/memory/artifacts/tool_calls/citations/shares)
   library projects               list projects with conversation counts
+  library projects name=X detail=true  full project record including system prompt
   library outline <uuid>         turn-by-turn outline of one conversation
-  library get <uuid>             full transcript
-  library doc <uuid>             full project knowledge-base document
+  library open <uuid>            read any item by uuid (conversation, doc, artifact, share, memory)
   library status                 cache and auth check
 ```
 
 ## Don'ts
 
-- Don't `library_get` an entire 200-message conversation when the user asked one question. Use `outline` plus a bounded `get`.
+- Don't `library_open` an entire 200-message conversation when the user asked one question. Use `library_outline` plus a bounded `library_open`.
 - Don't ask the user to sync without first checking `library_status` to see if the cache is empty.
 - Don't fabricate conversation titles or UUIDs. If a search returns nothing, say so.
 - Don't read `~/.claude/library/library.db` with Bash. Use the tools.
