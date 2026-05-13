@@ -19,6 +19,19 @@ const DB_PATH = join(CACHE_DIR, 'library.db');
 const LEGACY_DIR = join(homedir(), '.claude', 'hansard');
 const LEGACY_DB = join(LEGACY_DIR, 'hansard.db');
 
+function ensureColumns(
+  d: Database.Database,
+  table: string,
+  columns: Array<[name: string, ddl: string]>,
+): void {
+  const existing = new Set(
+    (d.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[]).map((r) => r.name),
+  );
+  for (const [name, ddl] of columns) {
+    if (!existing.has(name)) d.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${ddl}`);
+  }
+}
+
 function migrateFromHansard(): void {
   if (existsSync(DB_PATH) || !existsSync(LEGACY_DB)) return;
   try {
@@ -258,30 +271,27 @@ function open(): Database.Database {
       DELETE FROM artifacts_fts WHERE artifact_uuid = old.uuid;
     END;
   `);
-  // Backfill columns added after v0.1.0.
-  const convoCols = db.prepare('PRAGMA table_info(conversations)').all() as { name: string }[];
-  const hasConvoCol = (n: string) => convoCols.some((c) => c.name === n);
-  if (!hasConvoCol('messages_synced_for')) db.exec('ALTER TABLE conversations ADD COLUMN messages_synced_for TEXT');
-  if (!hasConvoCol('is_temporary')) db.exec('ALTER TABLE conversations ADD COLUMN is_temporary INTEGER NOT NULL DEFAULT 0');
-  if (!hasConvoCol('current_leaf_uuid')) db.exec('ALTER TABLE conversations ADD COLUMN current_leaf_uuid TEXT');
-  if (!hasConvoCol('platform')) db.exec('ALTER TABLE conversations ADD COLUMN platform TEXT');
-  if (!hasConvoCol('session_id')) db.exec('ALTER TABLE conversations ADD COLUMN session_id TEXT');
-  if (!hasConvoCol('settings_json')) db.exec('ALTER TABLE conversations ADD COLUMN settings_json TEXT');
-
-  const msgCols = db.prepare('PRAGMA table_info(messages)').all() as { name: string }[];
-  const hasMsgCol = (n: string) => msgCols.some((c) => c.name === n);
-  if (!hasMsgCol('parent_uuid')) db.exec('ALTER TABLE messages ADD COLUMN parent_uuid TEXT');
-  if (!hasMsgCol('input_mode')) db.exec('ALTER TABLE messages ADD COLUMN input_mode TEXT');
-  if (!hasMsgCol('stop_reason')) db.exec('ALTER TABLE messages ADD COLUMN stop_reason TEXT');
-  if (!hasMsgCol('truncated')) db.exec('ALTER TABLE messages ADD COLUMN truncated INTEGER NOT NULL DEFAULT 0');
-  if (!hasMsgCol('compaction_summary')) db.exec('ALTER TABLE messages ADD COLUMN compaction_summary TEXT');
-
-  const projCols = db.prepare('PRAGMA table_info(projects)').all() as { name: string }[];
-  const hasProjCol = (n: string) => projCols.some((c) => c.name === n);
-  if (!hasProjCol('prompt_template')) db.exec('ALTER TABLE projects ADD COLUMN prompt_template TEXT');
-  if (!hasProjCol('is_harmony_project')) db.exec('ALTER TABLE projects ADD COLUMN is_harmony_project INTEGER NOT NULL DEFAULT 0');
-  if (!hasProjCol('docs_count')) db.exec('ALTER TABLE projects ADD COLUMN docs_count INTEGER NOT NULL DEFAULT 0');
-  if (!hasProjCol('files_count')) db.exec('ALTER TABLE projects ADD COLUMN files_count INTEGER NOT NULL DEFAULT 0');
+  ensureColumns(db, 'conversations', [
+    ['messages_synced_for', 'TEXT'],
+    ['is_temporary', 'INTEGER NOT NULL DEFAULT 0'],
+    ['current_leaf_uuid', 'TEXT'],
+    ['platform', 'TEXT'],
+    ['session_id', 'TEXT'],
+    ['settings_json', 'TEXT'],
+  ]);
+  ensureColumns(db, 'messages', [
+    ['parent_uuid', 'TEXT'],
+    ['input_mode', 'TEXT'],
+    ['stop_reason', 'TEXT'],
+    ['truncated', 'INTEGER NOT NULL DEFAULT 0'],
+    ['compaction_summary', 'TEXT'],
+  ]);
+  ensureColumns(db, 'projects', [
+    ['prompt_template', 'TEXT'],
+    ['is_harmony_project', 'INTEGER NOT NULL DEFAULT 0'],
+    ['docs_count', 'INTEGER NOT NULL DEFAULT 0'],
+    ['files_count', 'INTEGER NOT NULL DEFAULT 0'],
+  ]);
 
   return db;
 }
