@@ -245,6 +245,37 @@ function open(): Database.Database {
     );
     CREATE INDEX IF NOT EXISTS shares_org ON shares(org_id);
     CREATE INDEX IF NOT EXISTS shares_convo ON shares(conversation_uuid);
+
+    CREATE TABLE IF NOT EXISTS artifacts (
+      uuid TEXT PRIMARY KEY,
+      message_uuid TEXT NOT NULL,
+      conversation_uuid TEXT NOT NULL,
+      position INTEGER NOT NULL,
+      source TEXT NOT NULL,
+      identifier TEXT,
+      artifact_type TEXT,
+      title TEXT,
+      content TEXT NOT NULL,
+      char_count INTEGER NOT NULL,
+      line_count INTEGER NOT NULL,
+      created_at TEXT,
+      FOREIGN KEY(message_uuid) REFERENCES messages(uuid) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS artifacts_msg ON artifacts(message_uuid);
+    CREATE INDEX IF NOT EXISTS artifacts_convo ON artifacts(conversation_uuid);
+    CREATE INDEX IF NOT EXISTS artifacts_type ON artifacts(artifact_type);
+
+    CREATE VIRTUAL TABLE IF NOT EXISTS artifacts_fts USING fts5(
+      content, title, artifact_uuid UNINDEXED, message_uuid UNINDEXED,
+      conversation_uuid UNINDEXED, artifact_type UNINDEXED
+    );
+    CREATE TRIGGER IF NOT EXISTS artifacts_ai AFTER INSERT ON artifacts BEGIN
+      INSERT INTO artifacts_fts(content, title, artifact_uuid, message_uuid, conversation_uuid, artifact_type)
+      VALUES (new.content, coalesce(new.title, ''), new.uuid, new.message_uuid, new.conversation_uuid, coalesce(new.artifact_type, ''));
+    END;
+    CREATE TRIGGER IF NOT EXISTS artifacts_ad AFTER DELETE ON artifacts BEGIN
+      DELETE FROM artifacts_fts WHERE artifact_uuid = old.uuid;
+    END;
   `);
   // Backfill columns added after v0.1.0.
   const convoCols = db.prepare('PRAGMA table_info(conversations)').all() as { name: string }[];
@@ -324,7 +355,7 @@ export function upsertConversation(orgId: string, c: ConversationSummary): void 
     });
 }
 
-function upsertMessageBlocks(msgs: Message[]): void {
+function upsertMessageBlocks(msgs: Message[], conversationUuid: string): void {
   const insBlock = db().prepare(
     `INSERT INTO message_blocks (uuid, message_uuid, position, type, text, tool_use_id, tool_name,
        tool_input_json, tool_result_text, is_error, integration_name, start_timestamp, stop_timestamp)
@@ -395,8 +426,106 @@ function upsertMessageBlocks(msgs: Message[]): void {
             );
           }
         }
+
+        if (m.sender === 'assistant' && text) {
+          upsertArtifacts(m.uuid, conversationUuid, m.created_at, text);
+        }
       }
     });
+  }
+}
+
+interface ExtractedArtifact {
+  position: number;
+  source: 'fenced_code' | 'antartifact_tag';
+  identifier?: string;
+  artifact_type?: string;
+  title?: string;
+  content: string;
+}
+
+function extractArtifacts(text: string): ExtractedArtifact[] {
+  const results: Array<ExtractedArtifact & { offset: number }> = [];
+  const claimed: Array<[number, number]> = [];
+
+  // Pass 1: <antArtifact ...>...</antArtifact> tags (case-insensitive)
+  const tagRe = /<antartifact([^>]*)>([\s\S]*?)<\/antartifact>/gi;
+  let m: RegExpExecArray | null;
+  while ((m = tagRe.exec(text)) !== null) {
+    const attrs = m[1];
+    const content = m[2];
+    const idMatch = /\bidentifier=["']([^"']+)["']/.exec(attrs);
+    const typeMatch = /\btype=["']([^"']+)["']/.exec(attrs);
+    const titleMatch = /\btitle=["']([^"']+)["']/.exec(attrs);
+    results.push({
+      position: 0,
+      offset: m.index,
+      source: 'antartifact_tag',
+      identifier: idMatch?.[1],
+      artifact_type: typeMatch?.[1],
+      title: titleMatch?.[1],
+      content,
+    });
+    claimed.push([m.index, m.index + m[0].length]);
+  }
+
+  // Pass 2: fenced code blocks
+  const fenceRe = /^(`{3,})(\w*)\n([\s\S]*?)\n\1$/gm;
+  while ((m = fenceRe.exec(text)) !== null) {
+    const start = m.index;
+    const end = m.index + m[0].length;
+    if (claimed.some(([s, e]) => start >= s && end <= e)) continue;
+    const content = m[3];
+    const lineCount = content.split('\n').length;
+    if (lineCount < 12 && content.length < 400) continue;
+    const lang = m[2] || undefined;
+    let title: string | undefined;
+    const firstLine = content.split('\n')[0].trim();
+    if (firstLine.length < 80 && (firstLine.startsWith('# ') || firstLine.startsWith('// '))) {
+      title = firstLine.replace(/^(#|\/\/)\s+/, '');
+    }
+    results.push({
+      position: 0,
+      offset: start,
+      source: 'fenced_code',
+      artifact_type: lang,
+      title,
+      content,
+    });
+    claimed.push([start, end]);
+  }
+
+  results.sort((a, b) => a.offset - b.offset);
+  return results.map((r, i) => {
+    const { offset: _o, ...rest } = r;
+    return { ...rest, position: i };
+  });
+}
+
+function upsertArtifacts(messageUuid: string, conversationUuid: string, createdAt: string, text: string): void {
+  db().prepare('DELETE FROM artifacts WHERE message_uuid = ?').run(messageUuid);
+  const artifacts = extractArtifacts(text);
+  if (artifacts.length === 0) return;
+  const ins = db().prepare(
+    `INSERT OR REPLACE INTO artifacts
+       (uuid, message_uuid, conversation_uuid, position, source, identifier, artifact_type, title, content, char_count, line_count, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  );
+  for (const a of artifacts) {
+    ins.run(
+      `${messageUuid}-art-${a.position}`,
+      messageUuid,
+      conversationUuid,
+      a.position,
+      a.source,
+      a.identifier ?? null,
+      a.artifact_type ?? null,
+      a.title ?? null,
+      a.content,
+      a.content.length,
+      a.content.split('\n').length,
+      createdAt,
+    );
   }
 }
 
@@ -507,7 +636,7 @@ export function upsertMessages(convo: ConversationFull): void {
         m.compaction_summary ?? null,
       );
     });
-    upsertMessageBlocks(msgs);
+    upsertMessageBlocks(msgs, convo.uuid);
     for (const m of msgs) {
       if (m.files && m.files.length > 0) upsertMessageFiles(m.uuid, m.files);
       if (m.attachments && m.attachments.length > 0) upsertMessageAttachments(m.uuid, m.attachments);
@@ -997,6 +1126,109 @@ export function queryToolCalls(opts: { tool?: string; integration?: string; limi
        ORDER BY m.created_at DESC LIMIT ?`,
     )
     .all(...args) as ToolCallHit[];
+}
+
+export interface ArtifactSearchHit {
+  artifact_uuid: string;
+  message_uuid: string;
+  conversation_uuid: string;
+  conversation_name: string;
+  artifact_type: string | null;
+  title: string | null;
+  line_count: number;
+  created_at: string | null;
+  snippet: string;
+  rank: number;
+}
+
+export function searchArtifacts(opts: {
+  query?: string;
+  type?: string;
+  convo?: string;
+  limit?: number;
+}): ArtifactSearchHit[] {
+  const limit = opts.limit ?? 25;
+
+  if (opts.query) {
+    const where: string[] = ['artifacts_fts MATCH ?'];
+    const args: unknown[] = [opts.query];
+    if (opts.type) { where.push('f.artifact_type = ?'); args.push(opts.type); }
+    if (opts.convo) { where.push('f.conversation_uuid = ?'); args.push(opts.convo); }
+    args.push(limit);
+    return db()
+      .prepare(
+        `SELECT
+           f.artifact_uuid AS artifact_uuid,
+           f.message_uuid AS message_uuid,
+           f.conversation_uuid AS conversation_uuid,
+           c.name AS conversation_name,
+           f.artifact_type AS artifact_type,
+           f.title AS title,
+           a.line_count AS line_count,
+           a.created_at AS created_at,
+           snippet(artifacts_fts, 0, '«', '»', '…', 16) AS snippet,
+           bm25(artifacts_fts) AS rank
+         FROM artifacts_fts f
+         JOIN artifacts a ON a.uuid = f.artifact_uuid
+         JOIN conversations c ON c.uuid = f.conversation_uuid
+         WHERE ${where.join(' AND ')}
+         ORDER BY rank LIMIT ?`,
+      )
+      .all(...args) as ArtifactSearchHit[];
+  }
+
+  const where: string[] = [];
+  const args: unknown[] = [];
+  if (opts.type) { where.push('a.artifact_type = ?'); args.push(opts.type); }
+  if (opts.convo) { where.push('a.conversation_uuid = ?'); args.push(opts.convo); }
+  const whereClause = where.length ? `WHERE ${where.join(' AND ')}` : '';
+  args.push(limit);
+  return db()
+    .prepare(
+      `SELECT
+         a.uuid AS artifact_uuid,
+         a.message_uuid AS message_uuid,
+         a.conversation_uuid AS conversation_uuid,
+         c.name AS conversation_name,
+         a.artifact_type AS artifact_type,
+         a.title AS title,
+         a.line_count AS line_count,
+         a.created_at AS created_at,
+         substr(a.content, 1, 120) AS snippet,
+         0 AS rank
+       FROM artifacts a
+       JOIN conversations c ON c.uuid = a.conversation_uuid
+       ${whereClause}
+       ORDER BY a.created_at DESC LIMIT ?`,
+    )
+    .all(...args) as ArtifactSearchHit[];
+}
+
+export interface ArtifactFull {
+  uuid: string;
+  message_uuid: string;
+  conversation_uuid: string;
+  conversation_name: string;
+  position: number;
+  source: string;
+  identifier: string | null;
+  artifact_type: string | null;
+  title: string | null;
+  content: string;
+  char_count: number;
+  line_count: number;
+  created_at: string | null;
+}
+
+export function getArtifact(uuid: string): ArtifactFull | undefined {
+  return db()
+    .prepare(
+      `SELECT a.*, c.name AS conversation_name
+       FROM artifacts a
+       JOIN conversations c ON c.uuid = a.conversation_uuid
+       WHERE a.uuid = ?`,
+    )
+    .get(uuid) as ArtifactFull | undefined;
 }
 
 export interface CitationHit {

@@ -15,6 +15,7 @@ import {
 } from '../lib/api.js';
 import {
   findProjectByName,
+  getArtifact,
   getCached,
   getConversationFreshness,
   getDoc,
@@ -34,6 +35,7 @@ import {
   queryToolCalls,
   replaceProjectDocs,
   search as searchCache,
+  searchArtifacts,
   searchDocs,
   searchMemory,
   setFileBlob,
@@ -319,7 +321,8 @@ const search: Tool = {
     const msgHits = searchCache(q, Number(args.limit ?? 20));
     const docHits = searchDocs(q, Number(args.docLimit ?? 10));
     const memHits = searchMemory(q, 3);
-    if (msgHits.length === 0 && docHits.length === 0 && memHits.length === 0) {
+    const artHits = searchArtifacts({ query: q, limit: 10 });
+    if (msgHits.length === 0 && docHits.length === 0 && memHits.length === 0 && artHits.length === 0) {
       return [note, `No matches for "${q}".`].filter(Boolean).join('\n');
     }
     const sections: string[] = [];
@@ -350,6 +353,17 @@ const search: Tool = {
         `Memory (${memHits.length}):\n` +
           memHits
             .map((h) => `[memory #${h.snapshot_id}] ${fmtDate(h.remote_updated_at)}\n  ${h.snippet}`)
+            .join('\n\n'),
+      );
+    }
+    if (artHits.length > 0) {
+      sections.push(
+        `Artifacts (${artHits.length}):\n` +
+          artHits
+            .map(
+              (h) =>
+                `[${h.artifact_type ?? 'artifact'}] ${h.title ? trim(h.title, 40) + '  ' : ''}${trim(h.conversation_name, 50)}  (${h.artifact_uuid})\n  ${h.snippet}`,
+            )
             .join('\n\n'),
       );
     }
@@ -692,4 +706,66 @@ const shares: Tool = {
   },
 };
 
-export const tools: Tool[] = [sync, list, search, outline, get, doc, projects, projectDetail, status, toolCalls, citations, fetchFiles, memory, memoryHistory, shares];
+const artifacts: Tool = {
+  name: 'library_artifacts',
+  description:
+    'Search or list code/document artifacts extracted from assistant messages. Artifacts are substantial fenced code blocks (>=12 lines or >=400 chars) and any <antArtifact> tags. Filter by type (e.g. "html", "javascript"), conversation UUID, or run a full-text query.',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      query: { type: 'string', description: 'FTS5 query string to search artifact content and titles.' },
+      type: { type: 'string', description: 'Filter by artifact_type / language tag (e.g. "python", "html").' },
+      convo: { type: 'string', description: 'Filter by conversation UUID.' },
+      limit: { type: 'number', description: 'Max rows (default 25).' },
+    },
+  },
+  handler: async (args) => {
+    const hits = searchArtifacts({
+      query: typeof args.query === 'string' ? args.query : undefined,
+      type: typeof args.type === 'string' ? args.type : undefined,
+      convo: typeof args.convo === 'string' ? args.convo : undefined,
+      limit: args.limit !== undefined ? Number(args.limit) : undefined,
+    });
+    if (hits.length === 0) return 'No matching artifacts in cache.';
+    const header = `${hits.length} artifact(s):`;
+    const body = hits
+      .map((h) => {
+        const type = (h.artifact_type ?? 'artifact').padEnd(12);
+        const title = h.title ? trim(h.title, 40) + '  ' : '';
+        const date = h.created_at ? fmtDate(h.created_at) : '-';
+        return `  ${date}  ${type}  ${String(h.line_count).padStart(4)}L  ${title}${trim(h.conversation_name, 50)}\n           ${h.artifact_uuid}`;
+      })
+      .join('\n');
+    return `${header}\n${body}`;
+  },
+};
+
+const artifactGet: Tool = {
+  name: 'library_artifact',
+  description:
+    'Return the full content of one artifact by UUID. Use after library_artifacts or library_search surfaces a hit you want to read in full.',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      uuid: { type: 'string', description: 'Artifact UUID (from library_artifacts results).' },
+    },
+    required: ['uuid'],
+  },
+  handler: async (args) => {
+    const uuid = String(args.uuid);
+    const a = getArtifact(uuid);
+    if (!a) return `Artifact ${uuid} not in cache.`;
+    const head = [
+      `# ${a.title ?? '(untitled)'}`,
+      `type: ${a.artifact_type ?? '(unknown)'}  lines: ${a.line_count}  chars: ${a.char_count}`,
+      `source: ${a.source}${a.identifier ? `  id: ${a.identifier}` : ''}`,
+      `conversation: ${a.conversation_name}  (${a.conversation_uuid})`,
+      `message: ${a.message_uuid}`,
+      a.created_at ? `created: ${fmtDate(a.created_at)}` : '',
+    ].filter(Boolean).join('\n');
+    const fence = a.artifact_type ? `\`\`\`${a.artifact_type}` : '```';
+    return `${head}\n\n${fence}\n${a.content}\n\`\`\``;
+  },
+};
+
+export const tools: Tool[] = [sync, list, search, outline, get, doc, projects, projectDetail, status, toolCalls, citations, fetchFiles, memory, memoryHistory, shares, artifacts, artifactGet];
