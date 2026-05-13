@@ -342,9 +342,16 @@ export function upsertConversation(orgId: string, c: ConversationSummary): void 
 }
 
 const warnedCitationDrop = new Set<string>();
+const warnedBlockTypes = new Set<string>();
 
-function isKnownBlock(b: { type: string }): b is Block {
-  return b.type === 'text' || b.type === 'thinking' || b.type === 'tool_use' || b.type === 'tool_result';
+function isKnownBlock(b: unknown): b is Block {
+  const t = (b as { type?: unknown })?.type;
+  if (t === 'text' || t === 'thinking' || t === 'tool_use' || t === 'tool_result') return true;
+  if (typeof t === 'string' && !warnedBlockTypes.has(t)) {
+    warnedBlockTypes.add(t);
+    process.stderr.write(`library: unknown block type "${t}" encountered, skipping. Update schemas.ts to support it.\n`);
+  }
+  return false;
 }
 
 function upsertMessageBlocks(msgs: Message[], conversationUuid: string): void {
