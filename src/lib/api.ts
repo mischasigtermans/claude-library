@@ -181,14 +181,16 @@ export async function listProjectFiles(
   projectId: string,
 ): Promise<Array<{ uuid: string; file_name?: string; raw: unknown }>> {
   const items = await call<unknown[]>(c, `/api/organizations/${orgId}/projects/${projectId}/files`);
-  return items.map((item) => {
+  const results: Array<{ uuid: string; file_name?: string; raw: unknown }> = [];
+  for (const item of items) {
     const obj = item as Record<string, unknown>;
-    return {
-      uuid: (obj.uuid as string | undefined) ?? String(Math.random()),
-      file_name: obj.file_name as string | undefined,
-      raw: item,
-    };
-  });
+    if (!obj.uuid) {
+      process.stderr.write(`library: project_files entry missing uuid, skipped (project ${projectId})\n`);
+      continue;
+    }
+    results.push({ uuid: obj.uuid as string, file_name: obj.file_name as string | undefined, raw: item });
+  }
+  return results;
 }
 
 export interface ProjectDoc {
