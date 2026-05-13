@@ -1,6 +1,9 @@
 # Claude Library
 
-Local searchable mirror of your Claude Chats.
+[![Version](https://img.shields.io/badge/dynamic/json?url=https://raw.githubusercontent.com/mischasigtermans/claude-library/main/.claude-plugin/plugin.json&query=$.version&label=version&prefix=v)](https://github.com/mischasigtermans/claude-library)
+[![License](https://img.shields.io/github/license/mischasigtermans/claude-library)](LICENSE)
+
+Local searchable mirror of your Claude chats, readable from any Claude Code session.
 
 Claude Chats are your conversations with Claude on claude.ai, in the Desktop app, or on mobile. Not Claude Code. Not Cowork. The chat product. Those conversations live on Anthropic's servers, so Code sessions can't see them. Claude Library uses your Claude Desktop session cookie to pull your chats, projects, memory, and shared snapshots, and caches them locally in SQLite. Any Claude Code or Cowork session can then search and read what you worked through.
 

@@ -22,12 +22,6 @@ Type-safety follow-ups from the post-0.2.0 cross-review and a couple of observab
 
 The buildout and cleanup release. Schema captures the full Claude Desktop library: conversation tree with regen branches, content blocks, citations, tool calls, files, attachments, projects with system prompts, organization memory snapshots, shared conversation links, and assistant-generated artifacts. Then a consolidation pass cut the tool surface from seventeen to seven and pulled type validation to the API edge.
 
-**Breaking**
-- Tool surface consolidated from 17 to 7. Removed: `library_tool_calls`, `library_citations`, `library_shares`, `library_artifacts`, `library_artifact`, `library_memory`, `library_memory_history`, `library_doc`, `library_get`, `library_project`, `library_fetch_files`.
-- `library_search` gains `kind` arg (`all` | `messages` | `docs` | `memory` | `artifacts` | `tool_calls` | `citations` | `shares`). The deleted facet tools' behavior is reachable here.
-- `library_open <uuid>` dispatcher replaces `library_get`, `library_doc`, `library_artifact`, and `library_memory`. Detects which table owns the UUID and renders accordingly.
-- `library_projects` gains optional `name` and `detail` args. `name=X detail=true` returns the full project record including `prompt_template`.
-
 **Added**
 - Conversation sync captures the full message tree (`tree=True`), including regen branches via `parent_message_uuid`.
 - `message_blocks` table indexes content blocks (text, thinking, tool_use, tool_result) with a separate FTS table (`blocks_fts`).
@@ -41,6 +35,10 @@ The buildout and cleanup release. Schema captures the full Claude Desktop librar
 - Per-target failure samples in the sync report (capped at 5 per org).
 
 **Changed**
+- Tool surface consolidated from 17 to 7. Removed: `library_tool_calls`, `library_citations`, `library_shares`, `library_artifacts`, `library_artifact`, `library_memory`, `library_memory_history`, `library_doc`, `library_get`, `library_project`, `library_fetch_files`.
+- `library_search` gains `kind` arg (`all` | `messages` | `docs` | `memory` | `artifacts` | `tool_calls` | `citations` | `shares`). The deleted facet tools' behavior is reachable here.
+- `library_open <uuid>` dispatcher replaces `library_get`, `library_doc`, `library_artifact`, and `library_memory`. Detects which table owns the UUID and renders accordingly.
+- `library_projects` gains optional `name` and `detail` args. `name=X detail=true` returns the full project record including `prompt_template`.
 - Validation at the API edge with zod. Each endpoint has a schema; `call<T>` parses instead of casting.
 - `Message.content` is a discriminated union (`text` | `thinking` | `tool_use` | `tool_result`). The block-insert path switches on `type` instead of casting twelve fields.
 - `ensureColumns(table, [[name, ddl]])` replaces the 25-line backfill ceremony across `conversations`, `messages`, and `projects`.

@@ -1,10 +1,10 @@
 {
   "name": "library",
-  "description": "Claude Library: searchable local mirror of your Claude Desktop conversations, projects, files, memory, and artifacts, exposed via MCP.",
   "version": "0.2.1",
-  "author": {
-    "name": "Mischa Sigtermans"
-  },
+  "description": "Local searchable mirror of your Claude chats, readable from any Claude Code session.",
+  "author": { "name": "Mischa Sigtermans" },
+  "homepage": "https://github.com/mischasigtermans/claude-library",
   "repository": "https://github.com/mischasigtermans/claude-library",
+  "license": "MIT",
   "keywords": ["mcp", "claude-desktop", "library", "search", "memory", "artifacts"]
 }
