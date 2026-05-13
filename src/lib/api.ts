@@ -1,4 +1,30 @@
+import type { z } from 'zod';
 import type { ClaudeCookies } from './auth.js';
+import {
+  OrgArraySchema,
+  ConversationSummarySchema,
+  ConversationFullSchema,
+  ProjectArraySchema,
+  ProjectExtendedSchema,
+  ProjectFileSchema,
+  ProjectDocArraySchema,
+  OrganizationMemorySchema,
+  ShareArraySchema,
+} from './schemas.js';
+
+export type {
+  Org,
+  ConversationSummary,
+  ConversationFull,
+  Message,
+  MessageFile,
+  Block,
+  Project,
+  ProjectExtended,
+  ProjectDoc,
+  OrganizationMemory,
+  Share,
+} from './schemas.js';
 
 const BASE = 'https://claude.ai';
 const UA =
@@ -19,7 +45,7 @@ export class SessionExpiredError extends Error {
   }
 }
 
-async function call<T>(c: ClaudeCookies, path: string): Promise<T> {
+async function call<T>(c: ClaudeCookies, path: string, schema: z.ZodType<T>): Promise<T> {
   const r = await fetch(`${BASE}${path}`, {
     headers: {
       Cookie: cookieHeader(c),
@@ -34,95 +60,32 @@ async function call<T>(c: ClaudeCookies, path: string): Promise<T> {
     const body = await r.text();
     throw new Error(`library: ${r.status} ${r.statusText} on ${path}\n${body.slice(0, 300)}`);
   }
-  return (await r.json()) as T;
+  return schema.parse(await r.json());
 }
 
-export interface Org {
-  uuid: string;
-  name: string;
-  capabilities?: string[];
-}
-
-export interface ConversationSummary {
-  uuid: string;
-  name: string;
-  summary?: string;
-  created_at: string;
-  updated_at: string;
-  model?: string | null;
-  is_starred?: boolean;
-  project_uuid?: string | null;
-  is_temporary?: boolean;
-  current_leaf_message_uuid?: string;
-  platform?: string;
-  session_id?: string | null;
-  settings?: Record<string, unknown>;
-  project?: { uuid: string; name: string } | null;
-}
-
-export interface MessageFileAsset {
-  url?: string;
-  primary_color?: string;
-  image_width?: number;
-  image_height?: number;
-}
-
-export interface MessageFile {
-  uuid: string;
-  file_uuid?: string;
-  file_kind?: string;
-  file_name?: string;
-  thumbnail_url?: string;
-  preview_url?: string;
-  thumbnail_asset?: MessageFileAsset;
-  preview_asset?: MessageFileAsset;
-  created_at?: string;
-}
-
-export interface Message {
-  uuid: string;
-  text: string;
-  content?: Array<{ type: string; text?: string; [key: string]: unknown }>;
-  sender: 'human' | 'assistant';
-  index?: number;
-  created_at: string;
-  updated_at: string;
-  parent_message_uuid?: string;
-  attachments?: unknown[];
-  files?: MessageFile[];
-  sync_sources?: unknown[];
-  truncated?: boolean;
-  input_mode?: string;
-  stop_reason?: string | null;
-  compaction_summary?: string | null;
-}
-
-export interface ConversationFull extends ConversationSummary {
-  chat_messages: Message[];
-}
-
-export function listOrgs(c: ClaudeCookies): Promise<Org[]> {
-  return call<Org[]>(c, '/api/organizations');
+export function listOrgs(c: ClaudeCookies) {
+  return call(c, '/api/organizations', OrgArraySchema);
 }
 
 export async function listConversationsPage(
   c: ClaudeCookies,
   orgId: string,
   opts: { limit?: number; offset?: number } = {},
-): Promise<ConversationSummary[]> {
+) {
   const limit = opts.limit ?? 100;
   const offset = opts.offset ?? 0;
-  return call<ConversationSummary[]>(
+  return call(
     c,
     `/api/organizations/${orgId}/chat_conversations?limit=${limit}&offset=${offset}`,
+    ConversationSummarySchema.array(),
   );
 }
 
 export async function* iterateConversations(
   c: ClaudeCookies,
   orgId: string,
-  opts: { pageSize?: number; stopWhen?: (page: ConversationSummary[]) => boolean } = {},
-): AsyncGenerator<ConversationSummary> {
+  opts: { pageSize?: number; stopWhen?: (page: import('./schemas.js').ConversationSummary[]) => boolean } = {},
+): AsyncGenerator<import('./schemas.js').ConversationSummary> {
   const pageSize = opts.pageSize ?? 100;
   let offset = 0;
   while (true) {
@@ -138,41 +101,24 @@ export function getConversation(
   c: ClaudeCookies,
   orgId: string,
   convoId: string,
-): Promise<ConversationFull> {
-  return call<ConversationFull>(
+) {
+  return call(
     c,
     `/api/organizations/${orgId}/chat_conversations/${convoId}?tree=True&rendering_mode=messages&render_all_tools=true`,
+    ConversationFullSchema,
   );
 }
 
-export interface Project {
-  uuid: string;
-  name: string;
-  description?: string;
-  is_starred?: boolean;
-  is_starter_project?: boolean;
-  created_at: string;
-  updated_at?: string;
-  archived_at?: string | null;
-}
-
-export interface ProjectExtended extends Project {
-  prompt_template?: string;
-  is_harmony_project?: boolean;
-  docs_count?: number;
-  files_count?: number;
-}
-
-export function listProjects(c: ClaudeCookies, orgId: string): Promise<Project[]> {
-  return call<Project[]>(c, `/api/organizations/${orgId}/projects`);
+export function listProjects(c: ClaudeCookies, orgId: string) {
+  return call(c, `/api/organizations/${orgId}/projects`, ProjectArraySchema);
 }
 
 export function getProject(
   c: ClaudeCookies,
   orgId: string,
   projectId: string,
-): Promise<ProjectExtended> {
-  return call<ProjectExtended>(c, `/api/organizations/${orgId}/projects/${projectId}`);
+) {
+  return call(c, `/api/organizations/${orgId}/projects/${projectId}`, ProjectExtendedSchema);
 }
 
 export async function listProjectFiles(
@@ -180,57 +126,34 @@ export async function listProjectFiles(
   orgId: string,
   projectId: string,
 ): Promise<Array<{ uuid: string; file_name?: string; raw: unknown }>> {
-  const items = await call<unknown[]>(c, `/api/organizations/${orgId}/projects/${projectId}/files`);
+  const items = await call(
+    c,
+    `/api/organizations/${orgId}/projects/${projectId}/files`,
+    ProjectFileSchema.array(),
+  );
   const results: Array<{ uuid: string; file_name?: string; raw: unknown }> = [];
   for (const item of items) {
-    const obj = item as Record<string, unknown>;
-    if (!obj.uuid) {
+    if (!item.uuid) {
       process.stderr.write(`library: project_files entry missing uuid, skipped (project ${projectId})\n`);
       continue;
     }
-    results.push({ uuid: obj.uuid as string, file_name: obj.file_name as string | undefined, raw: item });
+    results.push({ uuid: item.uuid, file_name: item.file_name, raw: item });
   }
   return results;
-}
-
-export interface ProjectDoc {
-  uuid: string;
-  file_name: string;
-  content: string;
-  project_uuid: string;
-  created_at: string;
-  estimated_token_count?: number;
 }
 
 export function listProjectDocs(
   c: ClaudeCookies,
   orgId: string,
   projectId: string,
-): Promise<ProjectDoc[]> {
-  return call<ProjectDoc[]>(c, `/api/organizations/${orgId}/projects/${projectId}/docs`);
+) {
+  return call(c, `/api/organizations/${orgId}/projects/${projectId}/docs`, ProjectDocArraySchema);
 }
 
-export interface Share {
-  uuid: string;
-  snapshot_name?: string;
-  conversation_uuid?: string | null;
-  project_uuid?: string | null;
-  last_message_index?: number | null;
-  created_at?: string;
-  updated_at?: string;
+export function listShares(c: ClaudeCookies, orgId: string) {
+  return call(c, `/api/organizations/${orgId}/shares`, ShareArraySchema);
 }
 
-export function listShares(c: ClaudeCookies, orgId: string): Promise<Share[]> {
-  return call<Share[]>(c, `/api/organizations/${orgId}/shares`);
+export function getOrgMemory(c: ClaudeCookies, orgId: string) {
+  return call(c, `/api/organizations/${orgId}/memory`, OrganizationMemorySchema);
 }
-
-export interface OrganizationMemory {
-  memory: string;
-  controls: unknown;
-  updated_at: string;
-}
-
-export function getOrgMemory(c: ClaudeCookies, orgId: string): Promise<OrganizationMemory> {
-  return call<OrganizationMemory>(c, `/api/organizations/${orgId}/memory`);
-}
-
