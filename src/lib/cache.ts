@@ -3,6 +3,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { existsSync, mkdirSync, renameSync } from 'node:fs';
 import type {
+  Block,
   ConversationFull,
   ConversationSummary,
   Message,
@@ -295,7 +296,7 @@ function messageText(m: Message): string {
   if (m.text && m.text.length > 0) return m.text;
   if (m.content) {
     return m.content
-      .map((c) => (c.type === 'text' ? c.text ?? '' : ''))
+      .map((c) => (c.type === 'text' && isKnownBlock(c) ? c.text ?? '' : ''))
       .filter(Boolean)
       .join('\n');
   }
@@ -335,6 +336,10 @@ export function upsertConversation(orgId: string, c: ConversationSummary): void 
     });
 }
 
+function isKnownBlock(b: { type: string }): b is Block {
+  return b.type === 'text' || b.type === 'thinking' || b.type === 'tool_use' || b.type === 'tool_result';
+}
+
 function upsertMessageBlocks(msgs: Message[], conversationUuid: string): void {
   const insBlock = db().prepare(
     `INSERT INTO message_blocks (uuid, message_uuid, position, type, text, tool_use_id, tool_name,
@@ -350,7 +355,9 @@ function upsertMessageBlocks(msgs: Message[], conversationUuid: string): void {
   for (const m of msgs) {
     if (!m.content || m.content.length === 0) continue;
     db().prepare('DELETE FROM message_blocks WHERE message_uuid = ?').run(m.uuid);
-    m.content.forEach((b, pos) => {
+    m.content.forEach((raw, pos) => {
+      if (!isKnownBlock(raw)) return;
+      const block = raw;
       const blockUuid = `${m.uuid}-${pos}`;
       let text: string | null = null;
       let toolUseId: string | null = null;
@@ -358,37 +365,60 @@ function upsertMessageBlocks(msgs: Message[], conversationUuid: string): void {
       let toolInputJson: string | null = null;
       let toolResultText: string | null = null;
       let isError = 0;
+      let integrationName: string | null = null;
+      let startTimestamp: string | null = null;
+      let stopTimestamp: string | null = null;
 
-      if (b.type === 'text' || b.type === 'thinking') {
-        text = (b.text as string | undefined) ?? null;
-      } else if (b.type === 'tool_use') {
-        toolUseId = (b.id as string | undefined) ?? null;
-        toolName = (b.name as string | undefined) ?? null;
-        toolInputJson = b.input !== undefined ? JSON.stringify(b.input) : null;
-      } else if (b.type === 'tool_result') {
-        toolUseId = (b.tool_use_id as string | undefined) ?? null;
-        toolName = (b.name as string | undefined) ?? null;
-        isError = (b.is_error as boolean | undefined) ? 1 : 0;
-        const resultContent = b.content as Array<{ type: string; text?: string }> | undefined;
-        if (resultContent) {
-          toolResultText = resultContent
-            .filter((rc) => rc.type === 'text')
-            .map((rc) => rc.text ?? '')
-            .join('\n') || null;
+      switch (block.type) {
+        case 'text': {
+          text = block.text ?? null;
+          integrationName = block.integration_name ?? null;
+          startTimestamp = block.start_timestamp ?? null;
+          stopTimestamp = block.stop_timestamp ?? null;
+          break;
+        }
+        case 'thinking': {
+          text = block.text ?? block.thinking ?? null;
+          break;
+        }
+        case 'tool_use': {
+          toolUseId = block.id ?? null;
+          toolName = block.name ?? null;
+          toolInputJson = block.input !== undefined ? JSON.stringify(block.input) : null;
+          integrationName = block.integration_name ?? null;
+          startTimestamp = block.start_timestamp ?? null;
+          stopTimestamp = block.stop_timestamp ?? null;
+          break;
+        }
+        case 'tool_result': {
+          toolUseId = block.tool_use_id ?? null;
+          toolName = block.name ?? null;
+          isError = block.is_error ? 1 : 0;
+          if (block.content) {
+            toolResultText = block.content
+              .filter((rc) => rc.type === 'text')
+              .map((rc) => rc.text ?? '')
+              .join('\n') || null;
+          }
+          integrationName = block.integration_name ?? null;
+          startTimestamp = block.start_timestamp ?? null;
+          stopTimestamp = block.stop_timestamp ?? null;
+          break;
+        }
+        default: {
+          const _exhaustive: never = block;
+          throw new Error(`unknown block type: ${(_exhaustive as {type: string}).type}`);
         }
       }
 
       insBlock.run(
-        blockUuid, m.uuid, pos, b.type,
+        blockUuid, m.uuid, pos, block.type,
         text, toolUseId, toolName, toolInputJson, toolResultText,
-        isError,
-        (b.integration_name as string | undefined) ?? null,
-        (b.start_timestamp as string | undefined) ?? null,
-        (b.stop_timestamp as string | undefined) ?? null,
+        isError, integrationName, startTimestamp, stopTimestamp,
       );
 
-      if (b.type === 'text') {
-        const citations = b.citations as Array<Record<string, unknown>> | undefined;
+      if (block.type === 'text') {
+        const citations = block.citations;
         if (citations) {
           for (const cit of citations) {
             const meta = (cit.metadata as Record<string, unknown> | undefined) ?? {};
@@ -411,8 +441,8 @@ function upsertMessageBlocks(msgs: Message[], conversationUuid: string): void {
 
     if (m.sender === 'assistant' && m.content) {
       const allText = m.content
-        .filter((b) => b.type === 'text' && b.text)
-        .map((b) => b.text as string)
+        .filter((b) => b.type === 'text' && isKnownBlock(b) && b.text)
+        .map((b) => (b as { text: string }).text)
         .join('\n');
       if (allText) upsertArtifacts(m.uuid, conversationUuid, m.created_at, allText);
     }
