@@ -156,8 +156,39 @@ export interface Project {
   archived_at?: string | null;
 }
 
+export interface ProjectExtended extends Project {
+  prompt_template?: string;
+  is_harmony_project?: boolean;
+  docs_count?: number;
+  files_count?: number;
+}
+
 export function listProjects(c: ClaudeCookies, orgId: string): Promise<Project[]> {
   return call<Project[]>(c, `/api/organizations/${orgId}/projects`);
+}
+
+export function getProject(
+  c: ClaudeCookies,
+  orgId: string,
+  projectId: string,
+): Promise<ProjectExtended> {
+  return call<ProjectExtended>(c, `/api/organizations/${orgId}/projects/${projectId}`);
+}
+
+export async function listProjectFiles(
+  c: ClaudeCookies,
+  orgId: string,
+  projectId: string,
+): Promise<Array<{ uuid: string; file_name?: string; raw: unknown }>> {
+  const items = await call<unknown[]>(c, `/api/organizations/${orgId}/projects/${projectId}/files`);
+  return items.map((item) => {
+    const obj = item as Record<string, unknown>;
+    return {
+      uuid: (obj.uuid as string | undefined) ?? String(Math.random()),
+      file_name: obj.file_name as string | undefined,
+      raw: item,
+    };
+  });
 }
 
 export interface ProjectDoc {

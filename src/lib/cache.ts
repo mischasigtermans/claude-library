@@ -8,6 +8,7 @@ import type {
   Message,
   MessageFile,
   Project,
+  ProjectExtended,
   ProjectDoc,
 } from './api.js';
 
@@ -194,6 +195,19 @@ function open(): Database.Database {
       fetched_at TEXT NOT NULL,
       PRIMARY KEY (file_uuid, variant)
     );
+
+    CREATE TABLE IF NOT EXISTS project_files (
+      uuid TEXT PRIMARY KEY,
+      project_uuid TEXT NOT NULL,
+      file_name TEXT,
+      raw_json TEXT,
+      synced_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS project_files_project ON project_files(project_uuid);
+
+    CREATE VIRTUAL TABLE IF NOT EXISTS project_prompts_fts USING fts5(
+      prompt_template, project_uuid UNINDEXED, project_name UNINDEXED
+    );
   `);
   // Backfill columns added after v0.1.0.
   const convoCols = db.prepare('PRAGMA table_info(conversations)').all() as { name: string }[];
@@ -212,6 +226,13 @@ function open(): Database.Database {
   if (!hasMsgCol('stop_reason')) db.exec('ALTER TABLE messages ADD COLUMN stop_reason TEXT');
   if (!hasMsgCol('truncated')) db.exec('ALTER TABLE messages ADD COLUMN truncated INTEGER NOT NULL DEFAULT 0');
   if (!hasMsgCol('compaction_summary')) db.exec('ALTER TABLE messages ADD COLUMN compaction_summary TEXT');
+
+  const projCols = db.prepare('PRAGMA table_info(projects)').all() as { name: string }[];
+  const hasProjCol = (n: string) => projCols.some((c) => c.name === n);
+  if (!hasProjCol('prompt_template')) db.exec('ALTER TABLE projects ADD COLUMN prompt_template TEXT');
+  if (!hasProjCol('is_harmony_project')) db.exec('ALTER TABLE projects ADD COLUMN is_harmony_project INTEGER NOT NULL DEFAULT 0');
+  if (!hasProjCol('docs_count')) db.exec('ALTER TABLE projects ADD COLUMN docs_count INTEGER NOT NULL DEFAULT 0');
+  if (!hasProjCol('files_count')) db.exec('ALTER TABLE projects ADD COLUMN files_count INTEGER NOT NULL DEFAULT 0');
 
   return db;
 }
@@ -483,6 +504,69 @@ export function upsertProject(orgId: string, p: Project): void {
       archived_at: p.archived_at ?? null,
       synced_at: new Date().toISOString(),
     });
+}
+
+export function upsertProjectExtended(orgId: string, p: ProjectExtended): void {
+  db()
+    .prepare(
+      `INSERT INTO projects (uuid, org_id, name, description, is_starred, created_at, updated_at, archived_at, synced_at,
+         prompt_template, is_harmony_project, docs_count, files_count)
+       VALUES (@uuid, @org_id, @name, @description, @is_starred, @created_at, @updated_at, @archived_at, @synced_at,
+         @prompt_template, @is_harmony_project, @docs_count, @files_count)
+       ON CONFLICT(uuid) DO UPDATE SET
+         name=excluded.name, description=excluded.description, is_starred=excluded.is_starred,
+         updated_at=excluded.updated_at, archived_at=excluded.archived_at, synced_at=excluded.synced_at,
+         prompt_template=excluded.prompt_template, is_harmony_project=excluded.is_harmony_project,
+         docs_count=excluded.docs_count, files_count=excluded.files_count`,
+    )
+    .run({
+      uuid: p.uuid,
+      org_id: orgId,
+      name: p.name,
+      description: p.description ?? null,
+      is_starred: p.is_starred ? 1 : 0,
+      created_at: p.created_at,
+      updated_at: p.updated_at ?? null,
+      archived_at: p.archived_at ?? null,
+      synced_at: new Date().toISOString(),
+      prompt_template: p.prompt_template || null,
+      is_harmony_project: p.is_harmony_project ? 1 : 0,
+      docs_count: p.docs_count ?? 0,
+      files_count: p.files_count ?? 0,
+    });
+  db().prepare('DELETE FROM project_prompts_fts WHERE project_uuid = ?').run(p.uuid);
+  if (p.prompt_template) {
+    db()
+      .prepare('INSERT INTO project_prompts_fts (prompt_template, project_uuid, project_name) VALUES (?, ?, ?)')
+      .run(p.prompt_template, p.uuid, p.name);
+  }
+}
+
+export function upsertProjectFiles(
+  projectUuid: string,
+  files: Array<{ uuid: string; file_name?: string; raw: unknown }>,
+): void {
+  db().prepare('DELETE FROM project_files WHERE project_uuid = ?').run(projectUuid);
+  if (files.length === 0) return;
+  const ins = db().prepare(
+    'INSERT INTO project_files (uuid, project_uuid, file_name, raw_json, synced_at) VALUES (?, ?, ?, ?, ?)',
+  );
+  const now = new Date().toISOString();
+  for (const f of files) {
+    ins.run(f.uuid, projectUuid, f.file_name ?? null, JSON.stringify(f.raw), now);
+  }
+}
+
+export function getProjectCached(nameOrUuid: string): (ProjectWithCount & { prompt_template?: string | null }) | undefined {
+  const lower = nameOrUuid.toLowerCase();
+  return db()
+    .prepare(
+      `SELECT p.*, (SELECT COUNT(*) FROM conversations c WHERE c.project_uuid = p.uuid) AS conversation_count
+       FROM projects p
+       WHERE LOWER(p.name) = ? OR p.uuid = ?
+       LIMIT 1`,
+    )
+    .get(lower, nameOrUuid) as (ProjectWithCount & { prompt_template?: string | null }) | undefined;
 }
 
 export function getConversationFreshness(uuid: string): { updated_at: string; messages_synced_for: string | null } | undefined {

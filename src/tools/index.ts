@@ -2,9 +2,11 @@ import { readClaudeCookies, type ClaudeCookies } from '../lib/auth.js';
 import {
   fetchFileBlob,
   getConversation,
+  getProject,
   iterateConversations,
   listOrgs,
   listProjectDocs,
+  listProjectFiles,
   listProjects,
   SessionExpiredError,
   type Org,
@@ -16,6 +18,7 @@ import {
   getDoc,
   getMessages,
   getMeta,
+  getProjectCached,
   lastSyncedAt,
   listCached,
   listFilesNeedingBlob,
@@ -32,6 +35,8 @@ import {
   upsertConversation,
   upsertMessages,
   upsertProject,
+  upsertProjectExtended,
+  upsertProjectFiles,
 } from '../lib/cache.js';
 
 export interface Tool {
@@ -86,6 +91,18 @@ async function syncOrg(
     stats.projects = projects.length;
     for (const p of projects) {
       try {
+        const extended = await getProject(cookies, org.uuid, p.uuid);
+        upsertProjectExtended(org.uuid, extended);
+      } catch (err) {
+        if (err instanceof SessionExpiredError) throw err;
+      }
+      try {
+        const pfiles = await listProjectFiles(cookies, org.uuid, p.uuid);
+        upsertProjectFiles(p.uuid, pfiles);
+      } catch (err) {
+        if (err instanceof SessionExpiredError) throw err;
+      }
+      try {
         const docs = await listProjectDocs(cookies, org.uuid, p.uuid);
         if (docs.length > 0) {
           replaceProjectDocs(p.uuid, docs);
@@ -93,7 +110,6 @@ async function syncOrg(
         }
       } catch (err) {
         if (err instanceof SessionExpiredError) throw err;
-        // Per-project doc fetch failures are non-fatal.
       }
     }
   } catch (err) {
@@ -398,7 +414,8 @@ const projects: Tool = {
         const star = p.is_starred ? '★' : ' ';
         const archived = p.archived_at ? ' (archived)' : '';
         const desc = p.description ? `  ${trim(p.description, 60)}` : '';
-        return `${star} ${String(p.conversation_count).padStart(4)} convos  ${trim(p.name, 40).padEnd(42)}${desc}${archived}\n     ${p.uuid}`;
+        const hasPrompt = (p as Record<string, unknown>).prompt_template ? ' [prompt]' : '';
+        return `${star} ${String(p.conversation_count).padStart(4)} convos  ${trim(p.name, 40).padEnd(42)}${desc}${hasPrompt}${archived}\n     ${p.uuid}`;
       })
       .join('\n');
     return [note, body].filter(Boolean).join('\n\n');
@@ -496,6 +513,42 @@ const citations: Tool = {
   },
 };
 
+const projectDetail: Tool = {
+  name: 'library_project',
+  description:
+    'Return full details for one project by name or UUID, including its system prompt (prompt_template).',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      project: { type: 'string', description: 'Project name or UUID.' },
+    },
+    required: ['project'],
+  },
+  handler: async (args) => {
+    const nameOrUuid = String(args.project);
+    const p = getProjectCached(nameOrUuid);
+    if (!p) return `No project matches "${nameOrUuid}". Try library_projects to list them.`;
+    const lines: string[] = [
+      `# ${p.name}`,
+      `uuid: ${p.uuid}`,
+      `conversations: ${p.conversation_count}`,
+    ];
+    if (p.description) lines.push(`description: ${p.description}`);
+    if (p.archived_at) lines.push(`archived: ${fmtDate(p.archived_at)}`);
+    lines.push(`created: ${fmtDate(p.created_at)}`);
+    const ext = p as Record<string, unknown>;
+    if (ext.docs_count !== undefined) lines.push(`docs: ${ext.docs_count}  files: ${ext.files_count ?? 0}`);
+    lines.push('');
+    if (ext.prompt_template) {
+      lines.push('## System prompt');
+      lines.push(String(ext.prompt_template));
+    } else {
+      lines.push('(no system prompt)');
+    }
+    return lines.join('\n');
+  },
+};
+
 const fetchFiles: Tool = {
   name: 'library_fetch_files',
   description:
@@ -538,4 +591,4 @@ const fetchFiles: Tool = {
   },
 };
 
-export const tools: Tool[] = [sync, list, search, outline, get, doc, projects, status, toolCalls, citations, fetchFiles];
+export const tools: Tool[] = [sync, list, search, outline, get, doc, projects, projectDetail, status, toolCalls, citations, fetchFiles];
