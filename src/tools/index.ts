@@ -1,6 +1,5 @@
 import { readClaudeCookies, type ClaudeCookies } from '../lib/auth.js';
 import {
-  fetchFileBlob,
   getConversation,
   getOrgMemory,
   getProject,
@@ -27,7 +26,6 @@ import {
   insertMemorySnapshot,
   lastSyncedAt,
   listCached,
-  listFilesNeedingBlob,
   listMemorySnapshots,
   listProjectsCached,
   listShares as cacheListShares,
@@ -38,7 +36,6 @@ import {
   searchArtifacts,
   searchDocs,
   searchMemory,
-  setFileBlob,
   setMeta,
   totalConversations,
   totalDocs,
@@ -637,48 +634,6 @@ const projectDetail: Tool = {
   },
 };
 
-const fetchFiles: Tool = {
-  name: 'library_fetch_files',
-  description:
-    'Fetch and cache file blobs (thumbnails or previews) for user-uploaded files in conversations. By default fetches missing thumbnails for image files across the 25 most recently updated conversations. Stores bytes locally so subsequent reads are instant.',
-  inputSchema: {
-    type: 'object',
-    properties: {
-      convo: { type: 'string', description: 'Limit to one conversation UUID.' },
-      variant: { type: 'string', description: "'thumbnail' or 'preview'. Default 'thumbnail'." },
-      kinds: {
-        type: 'array',
-        items: { type: 'string' },
-        description: "Filter by file_kind (e.g. ['image']). Default: all kinds.",
-      },
-    },
-  },
-  handler: async (args) => {
-    const cookies = readClaudeCookies();
-    const orgs = await listOrgs(cookies);
-    if (orgs.length === 0) return 'No orgs found.';
-    const orgId = orgs[0].uuid;
-    const variant = (typeof args.variant === 'string' && (args.variant === 'preview' ? 'preview' : 'thumbnail')) || 'thumbnail';
-    const kinds = Array.isArray(args.kinds) ? args.kinds.map(String) : undefined;
-    const convoUuid = typeof args.convo === 'string' ? args.convo : undefined;
-    const targets = listFilesNeedingBlob({ variant, kinds, convoUuid, limit: 100 });
-    if (targets.length === 0) return `No files need fetching (variant: ${variant}).`;
-    let fetched = 0;
-    let failed = 0;
-    for (const t of targets) {
-      try {
-        const bytes = await fetchFileBlob(cookies, orgId, t.file_uuid, variant);
-        setFileBlob(t.file_uuid, variant, bytes);
-        fetched++;
-      } catch (err) {
-        if (err instanceof SessionExpiredError) throw err;
-        failed++;
-      }
-    }
-    return `Fetched ${fetched} file blob(s) (variant: ${variant})${failed ? `, ${failed} failed` : ''}.`;
-  },
-};
-
 const shares: Tool = {
   name: 'library_shares',
   description:
@@ -768,4 +723,4 @@ const artifactGet: Tool = {
   },
 };
 
-export const tools: Tool[] = [sync, list, search, outline, get, doc, projects, projectDetail, status, toolCalls, citations, fetchFiles, memory, memoryHistory, shares, artifacts, artifactGet];
+export const tools: Tool[] = [sync, list, search, outline, get, doc, projects, projectDetail, status, toolCalls, citations, memory, memoryHistory, shares, artifacts, artifactGet];

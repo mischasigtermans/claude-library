@@ -181,14 +181,6 @@ function open(): Database.Database {
     CREATE INDEX IF NOT EXISTS message_files_msg ON message_files(message_uuid);
     CREATE INDEX IF NOT EXISTS message_files_kind ON message_files(file_kind);
 
-    CREATE TABLE IF NOT EXISTS file_blobs (
-      file_uuid TEXT NOT NULL,
-      variant TEXT NOT NULL,
-      bytes BLOB NOT NULL,
-      fetched_at TEXT NOT NULL,
-      PRIMARY KEY (file_uuid, variant)
-    );
-
     CREATE TABLE IF NOT EXISTS project_files (
       uuid TEXT PRIMARY KEY,
       project_uuid TEXT NOT NULL,
@@ -544,57 +536,6 @@ export function upsertMessageFiles(messageUuid: string, files: MessageFile[]): v
       f.created_at ?? null,
     );
   }
-}
-
-export function getFileBlob(fileUuid: string, variant: string): Buffer | undefined {
-  const row = db()
-    .prepare('SELECT bytes FROM file_blobs WHERE file_uuid = ? AND variant = ?')
-    .get(fileUuid, variant) as { bytes: Buffer } | undefined;
-  return row?.bytes;
-}
-
-export function setFileBlob(fileUuid: string, variant: string, bytes: Buffer): void {
-  db()
-    .prepare(
-      'INSERT INTO file_blobs (file_uuid, variant, bytes, fetched_at) VALUES (?, ?, ?, ?) ON CONFLICT(file_uuid, variant) DO UPDATE SET bytes = excluded.bytes, fetched_at = excluded.fetched_at',
-    )
-    .run(fileUuid, variant, bytes, new Date().toISOString());
-}
-
-export interface FileBlobTarget {
-  file_uuid: string;
-  message_uuid: string;
-  conversation_uuid: string;
-  file_kind: string | null;
-}
-
-export function listFilesNeedingBlob(opts: {
-  variant: string;
-  kinds?: string[];
-  convoUuid?: string;
-  limit?: number;
-} = { variant: 'thumbnail' }): FileBlobTarget[] {
-  const where: string[] = ['NOT EXISTS (SELECT 1 FROM file_blobs fb WHERE fb.file_uuid = mf.uuid AND fb.variant = ?)'];
-  const args: unknown[] = [opts.variant];
-  if (opts.kinds && opts.kinds.length > 0) {
-    where.push(`mf.file_kind IN (${opts.kinds.map(() => '?').join(',')})`);
-    args.push(...opts.kinds);
-  }
-  if (opts.convoUuid) {
-    where.push('m.conversation_uuid = ?');
-    args.push(opts.convoUuid);
-  }
-  args.push(opts.limit ?? 50);
-  return db()
-    .prepare(
-      `SELECT mf.uuid AS file_uuid, mf.message_uuid, m.conversation_uuid, mf.file_kind
-       FROM message_files mf
-       JOIN messages m ON m.uuid = mf.message_uuid
-       JOIN conversations c ON c.uuid = m.conversation_uuid
-       WHERE ${where.join(' AND ')}
-       ORDER BY c.updated_at DESC LIMIT ?`,
-    )
-    .all(...args) as FileBlobTarget[];
 }
 
 export function upsertMessages(convo: ConversationFull): void {

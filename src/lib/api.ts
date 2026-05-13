@@ -234,20 +234,3 @@ export function getOrgMemory(c: ClaudeCookies, orgId: string): Promise<Organizat
   return call<OrganizationMemory>(c, `/api/organizations/${orgId}/memory`);
 }
 
-export async function fetchFileBlob(
-  c: ClaudeCookies,
-  orgId: string,
-  fileUuid: string,
-  variant: 'thumbnail' | 'preview',
-): Promise<Buffer> {
-  const r = await fetch(`${BASE}/api/${orgId}/files/${fileUuid}/${variant}`, {
-    headers: {
-      Cookie: cookieHeader(c),
-      'User-Agent': UA,
-      Referer: `${BASE}/`,
-    },
-  });
-  if (r.status === 401) throw new SessionExpiredError();
-  if (!r.ok) throw new Error(`library: ${r.status} on file blob ${fileUuid}/${variant}`);
-  return Buffer.from(await r.arrayBuffer());
-}
