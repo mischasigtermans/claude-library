@@ -115,6 +115,52 @@ function open(): Database.Database {
     CREATE TRIGGER IF NOT EXISTS docs_ad AFTER DELETE ON project_docs BEGIN
       DELETE FROM docs_fts WHERE doc_uuid = old.uuid;
     END;
+
+    CREATE TABLE IF NOT EXISTS message_blocks (
+      uuid TEXT PRIMARY KEY,
+      message_uuid TEXT NOT NULL,
+      position INTEGER NOT NULL,
+      type TEXT NOT NULL,
+      text TEXT,
+      tool_use_id TEXT,
+      tool_name TEXT,
+      tool_input_json TEXT,
+      tool_result_text TEXT,
+      is_error INTEGER NOT NULL DEFAULT 0,
+      integration_name TEXT,
+      start_timestamp TEXT,
+      stop_timestamp TEXT,
+      FOREIGN KEY(message_uuid) REFERENCES messages(uuid) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS message_blocks_msg ON message_blocks(message_uuid, position);
+    CREATE INDEX IF NOT EXISTS message_blocks_tool ON message_blocks(tool_name) WHERE tool_name IS NOT NULL;
+
+    CREATE TABLE IF NOT EXISTS citations (
+      uuid TEXT PRIMARY KEY,
+      message_uuid TEXT NOT NULL,
+      block_position INTEGER NOT NULL,
+      title TEXT,
+      url TEXT,
+      site_domain TEXT,
+      site_name TEXT,
+      origin_tool_name TEXT,
+      start_index INTEGER,
+      end_index INTEGER,
+      FOREIGN KEY(message_uuid) REFERENCES messages(uuid) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS citations_msg ON citations(message_uuid);
+    CREATE INDEX IF NOT EXISTS citations_domain ON citations(site_domain);
+
+    CREATE VIRTUAL TABLE IF NOT EXISTS blocks_fts USING fts5(
+      text, message_uuid UNINDEXED, block_uuid UNINDEXED, type UNINDEXED
+    );
+    CREATE TRIGGER IF NOT EXISTS message_blocks_ai AFTER INSERT ON message_blocks BEGIN
+      INSERT INTO blocks_fts(text, message_uuid, block_uuid, type)
+      VALUES (coalesce(new.text, new.tool_result_text, ''), new.message_uuid, new.uuid, new.type);
+    END;
+    CREATE TRIGGER IF NOT EXISTS message_blocks_ad AFTER DELETE ON message_blocks BEGIN
+      DELETE FROM blocks_fts WHERE block_uuid = old.uuid;
+    END;
   `);
   // Backfill columns added after v0.1.0.
   const convoCols = db.prepare('PRAGMA table_info(conversations)').all() as { name: string }[];
@@ -187,6 +233,82 @@ export function upsertConversation(orgId: string, c: ConversationSummary): void 
     });
 }
 
+function upsertMessageBlocks(msgs: Message[]): void {
+  const insBlock = db().prepare(
+    `INSERT INTO message_blocks (uuid, message_uuid, position, type, text, tool_use_id, tool_name,
+       tool_input_json, tool_result_text, is_error, integration_name, start_timestamp, stop_timestamp)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  );
+  const insCitation = db().prepare(
+    `INSERT OR REPLACE INTO citations (uuid, message_uuid, block_position, title, url, site_domain,
+       site_name, origin_tool_name, start_index, end_index)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  );
+
+  for (const m of msgs) {
+    if (!m.content || m.content.length === 0) continue;
+    db().prepare('DELETE FROM message_blocks WHERE message_uuid = ?').run(m.uuid);
+    m.content.forEach((b, pos) => {
+      const blockUuid = `${m.uuid}-${pos}`;
+      let text: string | null = null;
+      let toolUseId: string | null = null;
+      let toolName: string | null = null;
+      let toolInputJson: string | null = null;
+      let toolResultText: string | null = null;
+      let isError = 0;
+
+      if (b.type === 'text' || b.type === 'thinking') {
+        text = (b.text as string | undefined) ?? null;
+      } else if (b.type === 'tool_use') {
+        toolUseId = (b.id as string | undefined) ?? null;
+        toolName = (b.name as string | undefined) ?? null;
+        toolInputJson = b.input !== undefined ? JSON.stringify(b.input) : null;
+      } else if (b.type === 'tool_result') {
+        toolUseId = (b.tool_use_id as string | undefined) ?? null;
+        toolName = (b.name as string | undefined) ?? null;
+        isError = (b.is_error as boolean | undefined) ? 1 : 0;
+        const resultContent = b.content as Array<{ type: string; text?: string }> | undefined;
+        if (resultContent) {
+          toolResultText = resultContent
+            .filter((rc) => rc.type === 'text')
+            .map((rc) => rc.text ?? '')
+            .join('\n') || null;
+        }
+      }
+
+      insBlock.run(
+        blockUuid, m.uuid, pos, b.type,
+        text, toolUseId, toolName, toolInputJson, toolResultText,
+        isError,
+        (b.integration_name as string | undefined) ?? null,
+        (b.start_timestamp as string | undefined) ?? null,
+        (b.stop_timestamp as string | undefined) ?? null,
+      );
+
+      if (b.type === 'text') {
+        const citations = b.citations as Array<Record<string, unknown>> | undefined;
+        if (citations) {
+          for (const cit of citations) {
+            const meta = (cit.metadata as Record<string, unknown> | undefined) ?? {};
+            insCitation.run(
+              cit.uuid as string,
+              m.uuid,
+              pos,
+              (cit.title as string | undefined) ?? null,
+              (cit.url as string | undefined) ?? null,
+              (meta.site_domain as string | undefined) ?? null,
+              (meta.site_name as string | undefined) ?? null,
+              (cit.origin_tool_name as string | undefined) ?? null,
+              (cit.start_index as number | undefined) ?? null,
+              (cit.end_index as number | undefined) ?? null,
+            );
+          }
+        }
+      }
+    });
+  }
+}
+
 export function upsertMessages(convo: ConversationFull): void {
   const tx = db().transaction((msgs: Message[]) => {
     db().prepare('DELETE FROM messages WHERE conversation_uuid = ?').run(convo.uuid);
@@ -205,6 +327,7 @@ export function upsertMessages(convo: ConversationFull): void {
         m.compaction_summary ?? null,
       );
     });
+    upsertMessageBlocks(msgs);
     db()
       .prepare(
         'UPDATE conversations SET messages_synced = 1, messages_synced_for = ?, synced_at = ? WHERE uuid = ?',
@@ -484,4 +607,63 @@ export function findProjectByName(name: string): ProjectWithCount | undefined {
        LIMIT 1`,
     )
     .get(lower, name) as ProjectWithCount | undefined;
+}
+
+export interface ToolCallHit {
+  created_at: string;
+  tool_name: string;
+  integration_name: string | null;
+  conversation_name: string;
+  conversation_uuid: string;
+  input_snippet: string;
+}
+
+export function queryToolCalls(opts: { tool?: string; integration?: string; limit?: number } = {}): ToolCallHit[] {
+  const where: string[] = ["b.type = 'tool_use'"];
+  const args: unknown[] = [];
+  if (opts.tool) { where.push('b.tool_name = ?'); args.push(opts.tool); }
+  if (opts.integration) { where.push('b.integration_name = ?'); args.push(opts.integration); }
+  args.push(opts.limit ?? 25);
+  return db()
+    .prepare(
+      `SELECT m.created_at, b.tool_name, b.integration_name, c.name AS conversation_name, c.uuid AS conversation_uuid,
+         substr(coalesce(b.tool_input_json, ''), 1, 80) AS input_snippet
+       FROM message_blocks b
+       JOIN messages m ON m.uuid = b.message_uuid
+       JOIN conversations c ON c.uuid = m.conversation_uuid
+       WHERE ${where.join(' AND ')}
+       ORDER BY m.created_at DESC LIMIT ?`,
+    )
+    .all(...args) as ToolCallHit[];
+}
+
+export interface CitationHit {
+  site_domain: string | null;
+  title: string | null;
+  url: string | null;
+  conversation_name: string;
+  conversation_uuid: string;
+}
+
+export function queryCitations(opts: { domain?: string; query?: string; limit?: number } = {}): CitationHit[] {
+  const where: string[] = [];
+  const args: unknown[] = [];
+  if (opts.domain) { where.push('ci.site_domain = ?'); args.push(opts.domain); }
+  if (opts.query) {
+    where.push("(ci.title LIKE ? OR ci.url LIKE ? OR ci.site_name LIKE ?)");
+    const pat = `%${opts.query}%`;
+    args.push(pat, pat, pat);
+  }
+  args.push(opts.limit ?? 25);
+  const whereClause = where.length ? `WHERE ${where.join(' AND ')}` : '';
+  return db()
+    .prepare(
+      `SELECT ci.site_domain, ci.title, ci.url, c.name AS conversation_name, c.uuid AS conversation_uuid
+       FROM citations ci
+       JOIN messages m ON m.uuid = ci.message_uuid
+       JOIN conversations c ON c.uuid = m.conversation_uuid
+       ${whereClause}
+       ORDER BY m.created_at DESC LIMIT ?`,
+    )
+    .all(...args) as CitationHit[];
 }

@@ -18,6 +18,8 @@ import {
   lastSyncedAt,
   listCached,
   listProjectsCached,
+  queryCitations,
+  queryToolCalls,
   replaceProjectDocs,
   search as searchCache,
   searchDocs,
@@ -428,4 +430,67 @@ const status: Tool = {
   },
 };
 
-export const tools: Tool[] = [sync, list, search, outline, get, doc, projects, status];
+const toolCalls: Tool = {
+  name: 'library_tool_calls',
+  description:
+    'List tool calls recorded across all cached conversations. Filter by tool name or integration. Useful for "when did I use the X tool" queries.',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      tool: { type: 'string', description: 'Filter by exact tool_name.' },
+      integration: { type: 'string', description: 'Filter by integration_name.' },
+      limit: { type: 'number', description: 'Max rows (default 25).' },
+    },
+  },
+  handler: async (args) => {
+    const hits = queryToolCalls({
+      tool: typeof args.tool === 'string' ? args.tool : undefined,
+      integration: typeof args.integration === 'string' ? args.integration : undefined,
+      limit: args.limit !== undefined ? Number(args.limit) : undefined,
+    });
+    if (hits.length === 0) return 'No matching tool calls in cache.';
+    const header = `${hits.length} tool call(s):`;
+    const body = hits
+      .map((h) => {
+        const ts = fmtDate(h.created_at);
+        const integ = h.integration_name ? ` [${h.integration_name}]` : '';
+        return `  ${ts}  ${h.tool_name}${integ}  ${trim(h.conversation_name, 50)}\n        ${h.input_snippet}`;
+      })
+      .join('\n');
+    return `${header}\n${body}`;
+  },
+};
+
+const citations: Tool = {
+  name: 'library_citations',
+  description:
+    'Search citations (web sources) saved in cached conversations. Filter by domain or search title/URL/site name.',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      domain: { type: 'string', description: 'Exact site_domain to filter (e.g. "bbc.co.uk").' },
+      query: { type: 'string', description: 'Substring search across title, URL, and site name.' },
+      limit: { type: 'number', description: 'Max rows (default 25).' },
+    },
+  },
+  handler: async (args) => {
+    const hits = queryCitations({
+      domain: typeof args.domain === 'string' ? args.domain : undefined,
+      query: typeof args.query === 'string' ? args.query : undefined,
+      limit: args.limit !== undefined ? Number(args.limit) : undefined,
+    });
+    if (hits.length === 0) return 'No matching citations in cache.';
+    const header = `${hits.length} citation(s):`;
+    const body = hits
+      .map((h) => {
+        const domain = h.site_domain ?? '(unknown domain)';
+        const title = h.title ? trim(h.title, 60) : '(no title)';
+        const url = h.url ? trim(h.url, 80) : '';
+        return `  ${domain.padEnd(30)}  ${title}\n        ${url}\n        ${trim(h.conversation_name, 60)}  (${h.conversation_uuid})`;
+      })
+      .join('\n');
+    return `${header}\n${body}`;
+  },
+};
+
+export const tools: Tool[] = [sync, list, search, outline, get, doc, projects, status, toolCalls, citations];
