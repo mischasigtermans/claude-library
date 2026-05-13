@@ -181,14 +181,6 @@ function open(): Database.Database {
     CREATE INDEX IF NOT EXISTS message_files_msg ON message_files(message_uuid);
     CREATE INDEX IF NOT EXISTS message_files_kind ON message_files(file_kind);
 
-    CREATE TABLE IF NOT EXISTS message_attachments (
-      uuid TEXT PRIMARY KEY,
-      message_uuid TEXT NOT NULL,
-      raw_json TEXT NOT NULL,
-      FOREIGN KEY(message_uuid) REFERENCES messages(uuid) ON DELETE CASCADE
-    );
-    CREATE INDEX IF NOT EXISTS message_attachments_msg ON message_attachments(message_uuid);
-
     CREATE TABLE IF NOT EXISTS file_blobs (
       file_uuid TEXT NOT NULL,
       variant TEXT NOT NULL,
@@ -558,19 +550,6 @@ export function upsertMessageFiles(messageUuid: string, files: MessageFile[]): v
   }
 }
 
-export function upsertMessageAttachments(messageUuid: string, atts: unknown[]): void {
-  db().prepare('DELETE FROM message_attachments WHERE message_uuid = ?').run(messageUuid);
-  if (atts.length === 0) return;
-  const ins = db().prepare(
-    'INSERT INTO message_attachments (uuid, message_uuid, raw_json) VALUES (?, ?, ?)',
-  );
-  atts.forEach((a, i) => {
-    const att = a as Record<string, unknown>;
-    const uuid = (att.uuid as string | undefined) ?? `${messageUuid}-att-${i}`;
-    ins.run(uuid, messageUuid, JSON.stringify(a));
-  });
-}
-
 export function getFileBlob(fileUuid: string, variant: string): Buffer | undefined {
   const row = db()
     .prepare('SELECT bytes FROM file_blobs WHERE file_uuid = ? AND variant = ?')
@@ -643,7 +622,6 @@ export function upsertMessages(convo: ConversationFull): void {
     upsertMessageBlocks(msgs, convo.uuid);
     for (const m of msgs) {
       if (m.files && m.files.length > 0) upsertMessageFiles(m.uuid, m.files);
-      if (m.attachments && m.attachments.length > 0) upsertMessageAttachments(m.uuid, m.attachments);
     }
     db()
       .prepare(
