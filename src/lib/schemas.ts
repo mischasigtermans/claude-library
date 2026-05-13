@@ -162,7 +162,12 @@ const MessageSchema = z
     truncated: z.boolean().nullish(),
     input_mode: z.string().nullish(),
     stop_reason: z.string().nullish(),
-    compaction_summary: z.unknown().nullish(),
+    compaction_summary: z.union([
+      z.string(),
+      z.array(z.unknown()),
+      z.record(z.string(), z.unknown()),
+      z.null(),
+    ]).nullish(),
   })
   .passthrough();
 
