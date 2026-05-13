@@ -2,8 +2,6 @@
 
 ## [0.2.1] - 2026-05-13
 
-Type-safety follow-ups from the post-0.2.0 cross-review and a couple of observability fixes.
-
 **Added**
 - `CitationSchema` and `CitationMetadataSchema` cover the citation shape end-to-end. The insert site now narrows from typed values instead of twelve `as` casts.
 - `library_status` surfaces the last auto-sync error (timestamp + message), so background failures stop hiding in response prefixes.
