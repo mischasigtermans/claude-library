@@ -198,10 +198,6 @@ function open(): Database.Database {
     );
     CREATE INDEX IF NOT EXISTS project_files_project ON project_files(project_uuid);
 
-    CREATE VIRTUAL TABLE IF NOT EXISTS project_prompts_fts USING fts5(
-      prompt_template, project_uuid UNINDEXED, project_name UNINDEXED
-    );
-
     CREATE TABLE IF NOT EXISTS memory_snapshots (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       org_id TEXT NOT NULL,
@@ -682,12 +678,6 @@ export function upsertProjectExtended(orgId: string, p: ProjectExtended): void {
       docs_count: p.docs_count ?? 0,
       files_count: p.files_count ?? 0,
     });
-  db().prepare('DELETE FROM project_prompts_fts WHERE project_uuid = ?').run(p.uuid);
-  if (p.prompt_template) {
-    db()
-      .prepare('INSERT INTO project_prompts_fts (prompt_template, project_uuid, project_name) VALUES (?, ?, ?)')
-      .run(p.prompt_template, p.uuid, p.name);
-  }
 }
 
 export function upsertProjectFiles(
