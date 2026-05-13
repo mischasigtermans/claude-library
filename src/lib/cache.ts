@@ -948,6 +948,7 @@ export function getMessages(convoUuid: string): CachedMessage[] {
 export interface SearchHit {
   conversation_uuid: string;
   conversation_name: string;
+  conv_starred: number;
   message_uuid: string;
   sender: string;
   snippet: string;
@@ -960,12 +961,16 @@ export function search(query: string, limit = 20): SearchHit[] {
       `SELECT
          f.conversation_uuid AS conversation_uuid,
          c.name AS conversation_name,
+         c.is_starred AS conv_starred,
          f.message_uuid AS message_uuid,
          f.sender AS sender,
          snippet(messages_fts, 0, '«', '»', '…', 16) AS snippet,
-         bm25(messages_fts) AS rank
+         (bm25(messages_fts)
+           - CASE WHEN c.is_starred=1 THEN 5.0 ELSE 0 END
+           - CASE WHEN p.is_starred=1 THEN 2.0 ELSE 0 END) AS rank
        FROM messages_fts f
        JOIN conversations c ON c.uuid = f.conversation_uuid
+       LEFT JOIN projects p ON p.uuid = c.project_uuid
        WHERE messages_fts MATCH ?
        ORDER BY rank LIMIT ?`,
     )
@@ -1079,7 +1084,7 @@ export function searchDocs(query: string, limit = 10): DocSearchHit[] {
          f.project_uuid AS project_uuid,
          p.name AS project_name,
          snippet(docs_fts, 0, '«', '»', '…', 16) AS snippet,
-         bm25(docs_fts) AS rank
+         (bm25(docs_fts) - CASE WHEN p.is_starred=1 THEN 2.0 ELSE 0 END) AS rank
        FROM docs_fts f
        LEFT JOIN projects p ON p.uuid = f.project_uuid
        WHERE docs_fts MATCH ?
@@ -1133,6 +1138,7 @@ export interface ArtifactSearchHit {
   message_uuid: string;
   conversation_uuid: string;
   conversation_name: string;
+  conv_starred?: number;
   artifact_type: string | null;
   title: string | null;
   line_count: number;
@@ -1162,15 +1168,19 @@ export function searchArtifacts(opts: {
            f.message_uuid AS message_uuid,
            f.conversation_uuid AS conversation_uuid,
            c.name AS conversation_name,
+           c.is_starred AS conv_starred,
            f.artifact_type AS artifact_type,
            f.title AS title,
            a.line_count AS line_count,
            a.created_at AS created_at,
            snippet(artifacts_fts, 0, '«', '»', '…', 16) AS snippet,
-           bm25(artifacts_fts) AS rank
+           (bm25(artifacts_fts)
+             - CASE WHEN c.is_starred=1 THEN 5.0 ELSE 0 END
+             - CASE WHEN p.is_starred=1 THEN 2.0 ELSE 0 END) AS rank
          FROM artifacts_fts f
          JOIN artifacts a ON a.uuid = f.artifact_uuid
          JOIN conversations c ON c.uuid = f.conversation_uuid
+         LEFT JOIN projects p ON p.uuid = c.project_uuid
          WHERE ${where.join(' AND ')}
          ORDER BY rank LIMIT ?`,
       )

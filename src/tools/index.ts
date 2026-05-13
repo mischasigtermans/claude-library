@@ -332,7 +332,7 @@ const search: Tool = {
           msgHits
             .map(
               (h) =>
-                `[${h.sender}] ${trim(h.conversation_name, 50)}  (${h.conversation_uuid})\n  ${h.snippet}`,
+                `[${h.sender}] ${trim(h.conversation_name, 50)}${h.conv_starred ? ' ★' : ''}  (${h.conversation_uuid})\n  ${h.snippet}`,
             )
             .join('\n\n'),
       );
@@ -362,7 +362,7 @@ const search: Tool = {
           artHits
             .map(
               (h) =>
-                `[${h.artifact_type ?? 'artifact'}] ${h.title ? trim(h.title, 40) + '  ' : ''}${trim(h.conversation_name, 50)}  (${h.artifact_uuid})\n  ${h.snippet}`,
+                `[${h.artifact_type ?? 'artifact'}] ${h.title ? trim(h.title, 40) + '  ' : ''}${trim(h.conversation_name, 50)}${h.conv_starred ? ' ★' : ''}  (${h.artifact_uuid})\n  ${h.snippet}`,
             )
             .join('\n\n'),
       );
