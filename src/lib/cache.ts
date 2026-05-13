@@ -354,7 +354,7 @@ function isKnownBlock(b: unknown): b is Block {
   return false;
 }
 
-function upsertMessageBlocks(msgs: Message[], conversationUuid: string): void {
+function upsertMessageBlocks(msgs: Message[], conversationUuid: string, artifactsByMessage: Map<string, ExtractedArtifact[]>): void {
   const insBlock = db().prepare(
     `INSERT INTO message_blocks (uuid, message_uuid, position, type, text, tool_use_id, tool_name,
        tool_input_json, tool_result_text, is_error, integration_name, start_timestamp, stop_timestamp)
@@ -460,13 +460,8 @@ function upsertMessageBlocks(msgs: Message[], conversationUuid: string): void {
       }
     });
 
-    if (m.sender === 'assistant' && m.content) {
-      const allText = m.content
-        .filter((b) => b.type === 'text' && isKnownBlock(b) && b.text)
-        .map((b) => (b as { text: string }).text)
-        .join('\n');
-      if (allText) upsertArtifacts(m.uuid, conversationUuid, m.created_at, allText);
-    }
+    const arts = artifactsByMessage.get(m.uuid);
+    if (arts && arts.length > 0) upsertArtifacts(m.uuid, conversationUuid, m.created_at, arts);
   }
 }
 
@@ -537,8 +532,8 @@ function extractArtifacts(text: string): ExtractedArtifact[] {
   });
 }
 
-function upsertArtifacts(messageUuid: string, conversationUuid: string, createdAt: string, text: string): void {
-  const artifacts = extractArtifacts(text);
+function upsertArtifacts(messageUuid: string, conversationUuid: string, createdAt: string, artifacts: ExtractedArtifact[]): void {
+  if (artifacts.length === 0) return;
   const ins = db().prepare(
     `INSERT OR REPLACE INTO artifacts
        (uuid, message_uuid, conversation_uuid, position, source, identifier, artifact_type, title, content, char_count, line_count, created_at)
@@ -596,13 +591,28 @@ export function upsertMessageFiles(messageUuid: string, files: MessageFile[]): v
 }
 
 export function upsertMessages(convo: ConversationFull): void {
-  const tx = db().transaction((msgs: Message[]) => {
+  const msgs = convo.chat_messages;
+
+  const artifactsByMessage = new Map<string, ExtractedArtifact[]>();
+  for (const m of msgs) {
+    if (m.sender !== 'assistant' || !m.content) continue;
+    const text = m.content
+      .filter((b) => b.type === 'text' && isKnownBlock(b) && (b as { text?: string }).text)
+      .map((b) => (b as { text: string }).text)
+      .join('\n');
+    if (text) {
+      const arts = extractArtifacts(text);
+      if (arts.length > 0) artifactsByMessage.set(m.uuid, arts);
+    }
+  }
+
+  const tx = db().transaction((items: Message[]) => {
     const ins = db().prepare(
       `INSERT INTO messages (uuid, conversation_uuid, idx, sender, text, created_at,
          parent_uuid, input_mode, stop_reason, truncated, compaction_summary)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
-    const indexedMsgs = msgs.map((m, i) => ({ m, i }));
+    const indexedMsgs = items.map((m, i) => ({ m, i }));
     replaceChildren(db(), 'messages', 'conversation_uuid', convo.uuid, indexedMsgs, ({ m, i }) => {
       ins.run(
         m.uuid, convo.uuid, m.index ?? i, m.sender, messageText(m), m.created_at,
@@ -613,8 +623,8 @@ export function upsertMessages(convo: ConversationFull): void {
         m.compaction_summary == null ? null : typeof m.compaction_summary === 'string' ? m.compaction_summary : JSON.stringify(m.compaction_summary),
       );
     });
-    upsertMessageBlocks(msgs, convo.uuid);
-    for (const m of msgs) {
+    upsertMessageBlocks(items, convo.uuid, artifactsByMessage);
+    for (const m of items) {
       if (m.files && m.files.length > 0) upsertMessageFiles(m.uuid, m.files);
     }
     db()
@@ -623,7 +633,7 @@ export function upsertMessages(convo: ConversationFull): void {
       )
       .run(convo.updated_at, new Date().toISOString(), convo.uuid);
   });
-  tx(convo.chat_messages);
+  tx(msgs);
 }
 
 export function upsertProject(orgId: string, p: ProjectExtended): void {
