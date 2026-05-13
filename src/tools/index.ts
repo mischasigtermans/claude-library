@@ -2,6 +2,7 @@ import { readClaudeCookies, type ClaudeCookies } from '../lib/auth.js';
 import {
   fetchFileBlob,
   getConversation,
+  getOrgMemory,
   getProject,
   iterateConversations,
   listOrgs,
@@ -16,18 +17,23 @@ import {
   getCached,
   getConversationFreshness,
   getDoc,
+  getLatestMemory,
+  getMemoryById,
   getMessages,
   getMeta,
   getProjectCached,
+  insertMemorySnapshot,
   lastSyncedAt,
   listCached,
   listFilesNeedingBlob,
+  listMemorySnapshots,
   listProjectsCached,
   queryCitations,
   queryToolCalls,
   replaceProjectDocs,
   search as searchCache,
   searchDocs,
+  searchMemory,
   setFileBlob,
   setMeta,
   totalConversations,
@@ -115,6 +121,18 @@ async function syncOrg(
   } catch (err) {
     if (err instanceof SessionExpiredError) throw err;
     // Older orgs may have no projects endpoint.
+  }
+
+  try {
+    const mem = await getOrgMemory(cookies, org.uuid);
+    insertMemorySnapshot(
+      org.uuid,
+      mem.memory,
+      mem.controls !== null && mem.controls !== undefined ? JSON.stringify(mem.controls) : null,
+      mem.updated_at,
+    );
+  } catch (err) {
+    if (err instanceof SessionExpiredError) throw err;
   }
 
   try {
@@ -290,7 +308,8 @@ const search: Tool = {
     const note = args.noSync ? null : await autoSyncIfStale();
     const msgHits = searchCache(q, Number(args.limit ?? 20));
     const docHits = searchDocs(q, Number(args.docLimit ?? 10));
-    if (msgHits.length === 0 && docHits.length === 0) {
+    const memHits = searchMemory(q, 3);
+    if (msgHits.length === 0 && docHits.length === 0 && memHits.length === 0) {
       return [note, `No matches for "${q}".`].filter(Boolean).join('\n');
     }
     const sections: string[] = [];
@@ -313,6 +332,14 @@ const search: Tool = {
               (h) =>
                 `[doc] ${trim(h.file_name, 40)}  in ${h.project_name ?? '(unknown project)'}  (${h.doc_uuid})\n  ${h.snippet}`,
             )
+            .join('\n\n'),
+      );
+    }
+    if (memHits.length > 0) {
+      sections.push(
+        `Memory (${memHits.length}):\n` +
+          memHits
+            .map((h) => `[memory #${h.snapshot_id}] ${fmtDate(h.remote_updated_at)}\n  ${h.snippet}`)
             .join('\n\n'),
       );
     }
@@ -513,6 +540,43 @@ const citations: Tool = {
   },
 };
 
+const memory: Tool = {
+  name: 'library_memory',
+  description:
+    "Return the organization's user memory. Defaults to the latest snapshot. Pass snapshot=<id> to read a historical one.",
+  inputSchema: {
+    type: 'object',
+    properties: {
+      snapshot: { type: 'number', description: 'Snapshot id (from library_memory_history). Default: latest.' },
+    },
+  },
+  handler: async (args) => {
+    const orgs = listMemorySnapshots();
+    if (orgs.length === 0) return 'No memory snapshots cached. Run library_sync first.';
+    const orgId = orgs[0].org_id;
+    const snap = args.snapshot !== undefined
+      ? getMemoryById(Number(args.snapshot))
+      : getLatestMemory(orgId);
+    if (!snap) return `Snapshot not found.`;
+    const head = `# Organization memory (snapshot #${snap.id}, ${fmtDate(snap.remote_updated_at)})\n`;
+    return head + '\n' + snap.memory;
+  },
+};
+
+const memoryHistory: Tool = {
+  name: 'library_memory_history',
+  description: 'List all cached organization memory snapshots with id, date, and character count.',
+  inputSchema: { type: 'object', properties: {} },
+  handler: async () => {
+    const rows = listMemorySnapshots();
+    if (rows.length === 0) return 'No memory snapshots cached. Run library_sync first.';
+    const body = rows
+      .map((r) => `  #${String(r.id).padStart(4)}  ${fmtDate(r.remote_updated_at)}  ${r.char_count} chars`)
+      .join('\n');
+    return `${rows.length} memory snapshot(s):\n${body}`;
+  },
+};
+
 const projectDetail: Tool = {
   name: 'library_project',
   description:
@@ -591,4 +655,4 @@ const fetchFiles: Tool = {
   },
 };
 
-export const tools: Tool[] = [sync, list, search, outline, get, doc, projects, projectDetail, status, toolCalls, citations, fetchFiles];
+export const tools: Tool[] = [sync, list, search, outline, get, doc, projects, projectDetail, status, toolCalls, citations, fetchFiles, memory, memoryHistory];

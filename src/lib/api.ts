@@ -208,6 +208,16 @@ export function listProjectDocs(
   return call<ProjectDoc[]>(c, `/api/organizations/${orgId}/projects/${projectId}/docs`);
 }
 
+export interface OrganizationMemory {
+  memory: string;
+  controls: unknown;
+  updated_at: string;
+}
+
+export function getOrgMemory(c: ClaudeCookies, orgId: string): Promise<OrganizationMemory> {
+  return call<OrganizationMemory>(c, `/api/organizations/${orgId}/memory`);
+}
+
 export async function fetchFileBlob(
   c: ClaudeCookies,
   orgId: string,

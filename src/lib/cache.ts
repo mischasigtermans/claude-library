@@ -208,6 +208,28 @@ function open(): Database.Database {
     CREATE VIRTUAL TABLE IF NOT EXISTS project_prompts_fts USING fts5(
       prompt_template, project_uuid UNINDEXED, project_name UNINDEXED
     );
+
+    CREATE TABLE IF NOT EXISTS memory_snapshots (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      org_id TEXT NOT NULL,
+      memory TEXT NOT NULL,
+      controls_json TEXT,
+      remote_updated_at TEXT NOT NULL,
+      fetched_at TEXT NOT NULL,
+      UNIQUE(org_id, remote_updated_at)
+    );
+    CREATE INDEX IF NOT EXISTS memory_snapshots_org ON memory_snapshots(org_id, remote_updated_at DESC);
+
+    CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
+      memory, org_id UNINDEXED, snapshot_id UNINDEXED, remote_updated_at UNINDEXED
+    );
+    CREATE TRIGGER IF NOT EXISTS memory_ai AFTER INSERT ON memory_snapshots BEGIN
+      INSERT INTO memory_fts(memory, org_id, snapshot_id, remote_updated_at)
+      VALUES (new.memory, new.org_id, new.id, new.remote_updated_at);
+    END;
+    CREATE TRIGGER IF NOT EXISTS memory_ad AFTER DELETE ON memory_snapshots BEGIN
+      DELETE FROM memory_fts WHERE snapshot_id = old.id;
+    END;
   `);
   // Backfill columns added after v0.1.0.
   const convoCols = db.prepare('PRAGMA table_info(conversations)').all() as { name: string }[];
@@ -567,6 +589,72 @@ export function getProjectCached(nameOrUuid: string): (ProjectWithCount & { prom
        LIMIT 1`,
     )
     .get(lower, nameOrUuid) as (ProjectWithCount & { prompt_template?: string | null }) | undefined;
+}
+
+export function insertMemorySnapshot(orgId: string, memory: string, controlsJson: string | null, remoteUpdatedAt: string): void {
+  db()
+    .prepare(
+      `INSERT OR IGNORE INTO memory_snapshots (org_id, memory, controls_json, remote_updated_at, fetched_at)
+       VALUES (?, ?, ?, ?, ?)`,
+    )
+    .run(orgId, memory, controlsJson, remoteUpdatedAt, new Date().toISOString());
+}
+
+export interface MemorySnapshot {
+  id: number;
+  org_id: string;
+  memory: string;
+  controls_json: string | null;
+  remote_updated_at: string;
+  fetched_at: string;
+}
+
+export function getLatestMemory(orgId: string): MemorySnapshot | undefined {
+  return db()
+    .prepare('SELECT * FROM memory_snapshots WHERE org_id = ? ORDER BY remote_updated_at DESC LIMIT 1')
+    .get(orgId) as MemorySnapshot | undefined;
+}
+
+export function getMemoryById(id: number): MemorySnapshot | undefined {
+  return db()
+    .prepare('SELECT * FROM memory_snapshots WHERE id = ?')
+    .get(id) as MemorySnapshot | undefined;
+}
+
+export function listMemorySnapshots(orgId?: string): Array<{ id: number; org_id: string; remote_updated_at: string; char_count: number }> {
+  const where = orgId ? 'WHERE org_id = ?' : '';
+  const args = orgId ? [orgId] : [];
+  return db()
+    .prepare(
+      `SELECT id, org_id, remote_updated_at, length(memory) AS char_count
+       FROM memory_snapshots ${where}
+       ORDER BY remote_updated_at DESC`,
+    )
+    .all(...args) as Array<{ id: number; org_id: string; remote_updated_at: string; char_count: number }>;
+}
+
+export interface MemorySearchHit {
+  snapshot_id: number;
+  org_id: string;
+  remote_updated_at: string;
+  snippet: string;
+  rank: number;
+}
+
+export function searchMemory(query: string, limit = 5): MemorySearchHit[] {
+  return db()
+    .prepare(
+      `SELECT
+         CAST(f.snapshot_id AS INTEGER) AS snapshot_id,
+         f.org_id AS org_id,
+         f.remote_updated_at AS remote_updated_at,
+         snippet(memory_fts, 0, '«', '»', '…', 16) AS snippet,
+         bm25(memory_fts) AS rank
+       FROM memory_fts f
+       WHERE memory_fts MATCH ?
+       ORDER BY rank LIMIT ?`,
+    )
+    .all(query, limit) as MemorySearchHit[];
 }
 
 export function getConversationFreshness(uuid: string): { updated_at: string; messages_synced_for: string | null } | undefined {
