@@ -52,16 +52,30 @@ export interface ConversationSummary {
   model?: string | null;
   is_starred?: boolean;
   project_uuid?: string | null;
+  is_temporary?: boolean;
+  current_leaf_message_uuid?: string;
+  platform?: string;
+  session_id?: string | null;
+  settings?: Record<string, unknown>;
+  project?: { uuid: string; name: string } | null;
 }
 
 export interface Message {
   uuid: string;
   text: string;
-  content?: Array<{ type: string; text?: string }>;
+  content?: Array<{ type: string; text?: string; [key: string]: unknown }>;
   sender: 'human' | 'assistant';
   index?: number;
   created_at: string;
   updated_at: string;
+  parent_message_uuid?: string;
+  attachments?: unknown[];
+  files?: unknown[];
+  sync_sources?: unknown[];
+  truncated?: boolean;
+  input_mode?: string;
+  stop_reason?: string | null;
+  compaction_summary?: string | null;
 }
 
 export interface ConversationFull extends ConversationSummary {
@@ -108,7 +122,7 @@ export function getConversation(
 ): Promise<ConversationFull> {
   return call<ConversationFull>(
     c,
-    `/api/organizations/${orgId}/chat_conversations/${convoId}?tree=False&rendering_mode=messages&render_all_tools=true`,
+    `/api/organizations/${orgId}/chat_conversations/${convoId}?tree=True&rendering_mode=messages&render_all_tools=true`,
   );
 }
 

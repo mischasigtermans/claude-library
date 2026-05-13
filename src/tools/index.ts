@@ -191,7 +191,7 @@ async function autoSyncIfStale(): Promise<string | null> {
 const sync: Tool = {
   name: 'library_sync',
   description:
-    'Pull new and updated conversations from Claude Desktop. Incremental by default. Only fetches messages for conversations that changed since last sync. Pass full=true to re-fetch everything.',
+    'Pull new and updated conversations from Claude Desktop. Incremental by default. Only fetches messages for conversations that changed since last sync. Captures regen branches and message tree (tree=True). Pass full=true to re-fetch everything.',
   inputSchema: {
     type: 'object',
     properties: {

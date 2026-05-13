@@ -117,10 +117,23 @@ function open(): Database.Database {
     END;
   `);
   // Backfill columns added after v0.1.0.
-  const cols = db.prepare("PRAGMA table_info(conversations)").all() as { name: string }[];
-  if (!cols.some((c) => c.name === 'messages_synced_for')) {
-    db.exec('ALTER TABLE conversations ADD COLUMN messages_synced_for TEXT');
-  }
+  const convoCols = db.prepare('PRAGMA table_info(conversations)').all() as { name: string }[];
+  const hasConvoCol = (n: string) => convoCols.some((c) => c.name === n);
+  if (!hasConvoCol('messages_synced_for')) db.exec('ALTER TABLE conversations ADD COLUMN messages_synced_for TEXT');
+  if (!hasConvoCol('is_temporary')) db.exec('ALTER TABLE conversations ADD COLUMN is_temporary INTEGER NOT NULL DEFAULT 0');
+  if (!hasConvoCol('current_leaf_uuid')) db.exec('ALTER TABLE conversations ADD COLUMN current_leaf_uuid TEXT');
+  if (!hasConvoCol('platform')) db.exec('ALTER TABLE conversations ADD COLUMN platform TEXT');
+  if (!hasConvoCol('session_id')) db.exec('ALTER TABLE conversations ADD COLUMN session_id TEXT');
+  if (!hasConvoCol('settings_json')) db.exec('ALTER TABLE conversations ADD COLUMN settings_json TEXT');
+
+  const msgCols = db.prepare('PRAGMA table_info(messages)').all() as { name: string }[];
+  const hasMsgCol = (n: string) => msgCols.some((c) => c.name === n);
+  if (!hasMsgCol('parent_uuid')) db.exec('ALTER TABLE messages ADD COLUMN parent_uuid TEXT');
+  if (!hasMsgCol('input_mode')) db.exec('ALTER TABLE messages ADD COLUMN input_mode TEXT');
+  if (!hasMsgCol('stop_reason')) db.exec('ALTER TABLE messages ADD COLUMN stop_reason TEXT');
+  if (!hasMsgCol('truncated')) db.exec('ALTER TABLE messages ADD COLUMN truncated INTEGER NOT NULL DEFAULT 0');
+  if (!hasMsgCol('compaction_summary')) db.exec('ALTER TABLE messages ADD COLUMN compaction_summary TEXT');
+
   return db;
 }
 
@@ -144,12 +157,16 @@ function messageText(m: Message): string {
 export function upsertConversation(orgId: string, c: ConversationSummary): void {
   db()
     .prepare(
-      `INSERT INTO conversations (uuid, org_id, name, summary, model, is_starred, project_uuid, created_at, updated_at, synced_at)
-       VALUES (@uuid, @org_id, @name, @summary, @model, @is_starred, @project_uuid, @created_at, @updated_at, @synced_at)
+      `INSERT INTO conversations (uuid, org_id, name, summary, model, is_starred, project_uuid, created_at, updated_at, synced_at,
+         is_temporary, current_leaf_uuid, platform, session_id, settings_json)
+       VALUES (@uuid, @org_id, @name, @summary, @model, @is_starred, @project_uuid, @created_at, @updated_at, @synced_at,
+         @is_temporary, @current_leaf_uuid, @platform, @session_id, @settings_json)
        ON CONFLICT(uuid) DO UPDATE SET
          name=excluded.name, summary=excluded.summary, model=excluded.model,
          is_starred=excluded.is_starred, project_uuid=excluded.project_uuid,
-         updated_at=excluded.updated_at, synced_at=excluded.synced_at`,
+         updated_at=excluded.updated_at, synced_at=excluded.synced_at,
+         is_temporary=excluded.is_temporary, current_leaf_uuid=excluded.current_leaf_uuid,
+         platform=excluded.platform, session_id=excluded.session_id, settings_json=excluded.settings_json`,
     )
     .run({
       uuid: c.uuid,
@@ -162,6 +179,11 @@ export function upsertConversation(orgId: string, c: ConversationSummary): void 
       created_at: c.created_at,
       updated_at: c.updated_at,
       synced_at: new Date().toISOString(),
+      is_temporary: c.is_temporary ? 1 : 0,
+      current_leaf_uuid: c.current_leaf_message_uuid ?? null,
+      platform: c.platform ?? null,
+      session_id: c.session_id ?? null,
+      settings_json: c.settings ? JSON.stringify(c.settings) : null,
     });
 }
 
@@ -169,10 +191,19 @@ export function upsertMessages(convo: ConversationFull): void {
   const tx = db().transaction((msgs: Message[]) => {
     db().prepare('DELETE FROM messages WHERE conversation_uuid = ?').run(convo.uuid);
     const ins = db().prepare(
-      'INSERT INTO messages (uuid, conversation_uuid, idx, sender, text, created_at) VALUES (?, ?, ?, ?, ?, ?)',
+      `INSERT INTO messages (uuid, conversation_uuid, idx, sender, text, created_at,
+         parent_uuid, input_mode, stop_reason, truncated, compaction_summary)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
     msgs.forEach((m, i) => {
-      ins.run(m.uuid, convo.uuid, m.index ?? i, m.sender, messageText(m), m.created_at);
+      ins.run(
+        m.uuid, convo.uuid, m.index ?? i, m.sender, messageText(m), m.created_at,
+        m.parent_message_uuid ?? null,
+        m.input_mode ?? null,
+        m.stop_reason ?? null,
+        m.truncated ? 1 : 0,
+        m.compaction_summary ?? null,
+      );
     });
     db()
       .prepare(
@@ -234,6 +265,11 @@ export interface CachedConversation {
   updated_at: string;
   messages_synced: number;
   message_count?: number;
+  is_temporary?: number;
+  current_leaf_uuid?: string | null;
+  platform?: string | null;
+  session_id?: string | null;
+  settings_json?: string | null;
 }
 
 export function listCached(opts: {
@@ -278,12 +314,19 @@ export interface CachedMessage {
   sender: string;
   text: string;
   created_at: string;
+  parent_uuid?: string | null;
+  input_mode?: string | null;
+  stop_reason?: string | null;
+  truncated?: number;
+  compaction_summary?: string | null;
 }
 
 export function getMessages(convoUuid: string): CachedMessage[] {
   return db()
     .prepare(
-      'SELECT uuid, idx, sender, text, created_at FROM messages WHERE conversation_uuid = ? ORDER BY idx ASC',
+      `SELECT uuid, idx, sender, text, created_at,
+         parent_uuid, input_mode, stop_reason, truncated, compaction_summary
+       FROM messages WHERE conversation_uuid = ? ORDER BY idx ASC`,
     )
     .all(convoUuid) as CachedMessage[];
 }
