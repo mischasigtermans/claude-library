@@ -1,7 +1,19 @@
-import Database from 'better-sqlite3';
+import { DatabaseSync } from 'node:sqlite';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { mkdirSync } from 'node:fs';
+
+function tx<T>(db: DatabaseSync, fn: () => T): T {
+  db.exec('BEGIN');
+  try {
+    const r = fn();
+    db.exec('COMMIT');
+    return r;
+  } catch (e) {
+    db.exec('ROLLBACK');
+    throw e;
+  }
+}
 import type {
   Block,
   Citation,
@@ -19,7 +31,7 @@ const CACHE_DIR = join(homedir(), '.claude', 'library');
 const DB_PATH = join(CACHE_DIR, 'library.db');
 
 function ensureColumns(
-  d: Database.Database,
+  d: DatabaseSync,
   table: string,
   columns: Array<[name: string, ddl: string]>,
 ): void {
@@ -32,7 +44,7 @@ function ensureColumns(
 }
 
 function replaceChildren<T>(
-  d: Database.Database,
+  d: DatabaseSync,
   table: string,
   parentCol: string,
   parentId: string,
@@ -43,10 +55,10 @@ function replaceChildren<T>(
   for (const row of rows) inserter(row);
 }
 
-function open(): Database.Database {
+function open(): DatabaseSync {
   mkdirSync(CACHE_DIR, { recursive: true });
-  const db = new Database(DB_PATH);
-  db.pragma('journal_mode = WAL');
+  const db = new DatabaseSync(DB_PATH);
+  db.exec('PRAGMA journal_mode = WAL');
   db.exec(`
     CREATE TABLE IF NOT EXISTS conversations (
       uuid TEXT PRIMARY KEY,
@@ -291,8 +303,8 @@ function open(): Database.Database {
   return db;
 }
 
-let _db: Database.Database | null = null;
-function db(): Database.Database {
+let _db: DatabaseSync | null = null;
+function db(): DatabaseSync {
   if (!_db) _db = open();
   return _db;
 }
@@ -606,13 +618,13 @@ export function upsertMessages(convo: ConversationFull): void {
     }
   }
 
-  const tx = db().transaction((items: Message[]) => {
+  tx(db(), () => {
     const ins = db().prepare(
       `INSERT INTO messages (uuid, conversation_uuid, idx, sender, text, created_at,
          parent_uuid, input_mode, stop_reason, truncated, compaction_summary)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
-    const indexedMsgs = items.map((m, i) => ({ m, i }));
+    const indexedMsgs = msgs.map((m, i) => ({ m, i }));
     replaceChildren(db(), 'messages', 'conversation_uuid', convo.uuid, indexedMsgs, ({ m, i }) => {
       ins.run(
         m.uuid, convo.uuid, m.index ?? i, m.sender, messageText(m), m.created_at,
@@ -623,8 +635,8 @@ export function upsertMessages(convo: ConversationFull): void {
         m.compaction_summary == null ? null : typeof m.compaction_summary === 'string' ? m.compaction_summary : JSON.stringify(m.compaction_summary),
       );
     });
-    upsertMessageBlocks(items, convo.uuid, artifactsByMessage);
-    for (const m of items) {
+    upsertMessageBlocks(msgs, convo.uuid, artifactsByMessage);
+    for (const m of msgs) {
       if (m.files && m.files.length > 0) upsertMessageFiles(m.uuid, m.files);
     }
     db()
@@ -633,7 +645,6 @@ export function upsertMessages(convo: ConversationFull): void {
       )
       .run(convo.updated_at, new Date().toISOString(), convo.uuid);
   });
-  tx(msgs);
 }
 
 export function upsertProject(orgId: string, p: ProjectExtended): void {
@@ -982,8 +993,8 @@ export function replaceProjectDocs(projectUuid: string, docs: ProjectDoc[]): voi
     'INSERT INTO project_docs (uuid, project_uuid, file_name, content, estimated_tokens, created_at, synced_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
   );
   const now = new Date().toISOString();
-  const tx = db().transaction((items: ProjectDoc[]) => {
-    replaceChildren(db(), 'project_docs', 'project_uuid', projectUuid, items, (d) => {
+  tx(db(), () => {
+    replaceChildren(db(), 'project_docs', 'project_uuid', projectUuid, docs, (d) => {
       ins.run(
         d.uuid,
         projectUuid,
@@ -995,7 +1006,6 @@ export function replaceProjectDocs(projectUuid: string, docs: ProjectDoc[]): voi
       );
     });
   });
-  tx(docs);
 }
 
 export interface CachedDoc {

@@ -1,8 +1,9 @@
 import { execFileSync } from 'node:child_process';
 import { createDecipheriv, pbkdf2Sync } from 'node:crypto';
-import Database from 'better-sqlite3';
+import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 
 const COOKIE_DB = join(homedir(), 'Library', 'Application Support', 'Claude', 'Cookies');
 const KEYCHAIN_SERVICE = 'Claude Safe Storage';
@@ -42,17 +43,20 @@ export interface ClaudeCookies {
 }
 
 export function readClaudeCookies(): ClaudeCookies {
-  const db = new Database(COOKIE_DB, { readonly: true, fileMustExist: true });
+  if (!existsSync(COOKIE_DB)) {
+    throw new Error(`library: Claude Desktop cookie database not found at ${COOKIE_DB}`);
+  }
+  const db = new DatabaseSync(COOKIE_DB, { readOnly: true });
   try {
     const get = (name: string): string | undefined => {
       const row = db
         .prepare(
           "SELECT encrypted_value FROM cookies WHERE name = ? AND host_key = '.claude.ai' ORDER BY length(encrypted_value) DESC LIMIT 1",
         )
-        .get(name) as { encrypted_value: Buffer } | undefined;
+        .get(name) as { encrypted_value: Uint8Array } | undefined;
       if (!row) return undefined;
       try {
-        return decrypt(row.encrypted_value);
+        return decrypt(Buffer.from(row.encrypted_value));
       } catch {
         return undefined;
       }

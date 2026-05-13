@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.2.2] - 2026-05-13
+
+**Fixed**
+- Plugin now ships ready to run with no install step. Replaced `better-sqlite3` (native binding, never compiled on install) with Node's built-in `node:sqlite`. Matches the parley and personas plugins: `git clone` → `node dist/server.js` works out of the box.
+
+**Requires**
+- Node 22.5+ (for stable `node:sqlite`).
+
 ## [0.2.1] - 2026-05-13
 
 **Added**

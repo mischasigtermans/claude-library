@@ -1,6 +1,6 @@
 {
   "name": "library",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Claude Library: a local searchable mirror of your Claude Desktop conversations, projects, files, memory, and artifacts, exposed via MCP.",
   "license": "MIT",
   "author": {
@@ -8,17 +8,18 @@
   },
   "repository": "https://github.com/mischasigtermans/claude-library",
   "type": "module",
+  "engines": {
+    "node": ">=22.5.0"
+  },
   "scripts": {
-    "build": "bun build src/server.ts --target=node --format=esm --outfile=dist/server.js --external better-sqlite3 --external @modelcontextprotocol/sdk",
+    "build": "bun build src/server.ts --target=node --format=esm --outfile=dist/server.js",
     "test": "vitest run"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",
-    "better-sqlite3": "^11.5.0",
     "zod": "^4.0.0"
   },
   "devDependencies": {
-    "@types/better-sqlite3": "^7.6.11",
     "@types/node": "^22.0.0",
     "vitest": "^4.1.5"
   }

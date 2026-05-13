@@ -18,6 +18,7 @@ Claude Chats are your conversations with Claude on claude.ai, in the Desktop app
 
 - macOS (uses the `security` CLI and Chromium-format cookie store)
 - Claude Desktop, signed in
+- Node 22.5+ (for the built-in `node:sqlite` module)
 - `jq` for the SessionStart hook (`brew install jq`)
 
 ## Quick start
