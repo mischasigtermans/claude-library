@@ -74,6 +74,13 @@ interface SyncStats {
   projects: number;
   docs: number;
   skipped?: string;
+  failureSamples: string[];
+}
+
+function recordFailure(stats: SyncStats, where: string, err: unknown): void {
+  if (stats.failureSamples.length >= 5) return;
+  const msg = err instanceof Error ? err.message : String(err);
+  stats.failureSamples.push(`${where}: ${msg.slice(0, 300)}`);
 }
 
 async function syncOrg(
@@ -90,6 +97,7 @@ async function syncOrg(
     newMessages: 0,
     projects: 0,
     docs: 0,
+    failureSamples: [],
   };
 
   try {
@@ -102,12 +110,14 @@ async function syncOrg(
         upsertProject(org.uuid, extended);
       } catch (err) {
         if (err instanceof SessionExpiredError) throw err;
+        recordFailure(stats, `getProject ${p.name}`, err);
       }
       try {
         const pfiles = await listProjectFiles(cookies, org.uuid, p.uuid);
         upsertProjectFiles(p.uuid, pfiles);
       } catch (err) {
         if (err instanceof SessionExpiredError) throw err;
+        recordFailure(stats, `listProjectFiles ${p.name}`, err);
       }
       try {
         const docs = await listProjectDocs(cookies, org.uuid, p.uuid);
@@ -117,11 +127,12 @@ async function syncOrg(
         }
       } catch (err) {
         if (err instanceof SessionExpiredError) throw err;
+        recordFailure(stats, `listProjectDocs ${p.name}`, err);
       }
     }
   } catch (err) {
     if (err instanceof SessionExpiredError) throw err;
-    // Older orgs may have no projects endpoint.
+    recordFailure(stats, 'listProjects', err);
   }
 
   try {
@@ -166,12 +177,13 @@ async function syncOrg(
         } catch (err) {
           if (err instanceof SessionExpiredError) throw err;
           stats.failedConvos++;
+          recordFailure(stats, `getConversation ${conv.name?.slice(0, 40) ?? conv.uuid}`, err);
         }
       }
     }
   } catch (err) {
     if (err instanceof SessionExpiredError) throw err;
-    stats.skipped = err instanceof Error ? err.message.split('\n')[0] : String(err);
+    stats.skipped = err instanceof Error ? err.message.slice(0, 500) : String(err);
   }
 
   return stats;
@@ -205,6 +217,9 @@ function formatSyncReport(results: SyncStats[]): string {
       `  ${r.org}: ${r.newConvos} new, ${r.updatedConvos} updated, ${r.unchangedConvos} unchanged, ${r.projects} projects, ${r.docs} project docs` +
         (r.failedConvos ? `, ${r.failedConvos} failed` : ''),
     );
+    for (const sample of r.failureSamples) {
+      lines.push(`    ! ${sample}`);
+    }
     totals.n += r.newConvos;
     totals.u += r.updatedConvos;
     totals.k += r.unchangedConvos;
@@ -299,7 +314,7 @@ const list: Tool = {
 const search: Tool = {
   name: 'library_search',
   description:
-    'Full-text search across cached messages, project docs, memory, artifacts, tool calls, citations, and shares. Auto-syncs if cache is older than 24 hours. Use kind= to restrict to one source. Supports FTS5 syntax (phrase quotes, AND/OR/NOT).',
+    'Search the local Claude Desktop library. The `kind` arg dispatches to one of several backends: messages, docs, memory, and artifacts use FTS5 (phrase quotes, AND/OR/NOT supported); citations use LIKE on title/url/site_name; tool_calls is exact-match on tool name; shares is substring match on snapshot_name. With `kind=all` (default), messages + docs + memory + artifacts are searched in parallel and merged. With `kind=memory` and no query, returns the snapshot history. Auto-syncs if cache is older than 24 hours.',
   inputSchema: {
     type: 'object',
     properties: {
