@@ -1,68 +1,62 @@
-# Library
+# Claude Library
 
-Read your Claude Desktop conversations from any Claude Code session.
+Local searchable mirror of your Claude Chats.
 
-`/library` ships a small MCP server. It decrypts your Claude Desktop session cookies via the macOS Keychain, pulls conversations from `claude.ai`, caches them locally in SQLite, and exposes tools to search, outline, and read them.
+Claude Chats are your conversations with Claude on claude.ai, in the Desktop app, or on mobile. Not Claude Code. Not Cowork. The chat product. Those conversations live on Anthropic's servers, so Code sessions can't see them. Claude Library uses your Claude Desktop session cookie to pull your chats, projects, memory, and shared snapshots, and caches them locally in SQLite. Any Claude Code or Cowork session can then search and read what you worked through.
 
-## Tools
-
-- `library_sync`. Pull new and updated conversations and project knowledge-base docs. Incremental by default.
-- `library_list`. Recent conversations from the cache. Filter by project.
-- `library_search`. Full-text search (SQLite FTS5) across messages and project docs.
-- `library_projects`. Projects with conversation counts.
-- `library_outline`. Turn-by-turn summary of one conversation.
-- `library_get`. Full transcript, optionally bounded by turn range.
-- `library_doc`. Full text of one project knowledge-base document.
-- `library_status`. Cache state and auth check.
-
-## Why
-
-Claude Desktop conversations live on Anthropic's servers. Claude Code can't see them. Library bridges that gap so a Code session can recall what you worked through with Desktop without copy-paste.
-
-It's not Parley. Parley routes live messages between running peer agents. Library is read-only access to frozen transcripts.
-
-## Install
-
-```bash
-git clone https://github.com/mischasigtermans/claude-library
-cd claude-library
-bun install
-bun run build
-```
-
-Register with Claude Code:
+## Installation
 
 ```
-/plugin marketplace add /path/to/claude-library
-/plugin install library@library
-/reload-plugins
+/plugin marketplace add mischasigtermans/by-mischa
+/plugin install library@by-mischa
 ```
 
-First run:
+### Requires
+
+- macOS (uses the `security` CLI and Chromium-format cookie store)
+- Claude Desktop, signed in
+- `jq` for the SessionStart hook (`brew install jq`)
+
+## Quick start
 
 ```
 /library sync
+/library search "stripe webhook retries"
 ```
+
+First sync pulls every conversation, project, doc, memory snapshot, and share into `~/.claude/library/library.db`. After that, sync is incremental. Search hits return ranked snippets across messages, project knowledge-base docs, your memory text, and extracted code artifacts. Drill into any result with `/library open <uuid>`.
+
+## Features
+
+- Full-text search (FTS5) across conversation messages, project knowledge-base docs, memory snapshots, and assistant-generated code artifacts.
+- Filtered search per source via `kind=`: messages, docs, memory, artifacts, tool_calls, citations, shares.
+- Branch-aware sync: captures regen branches via the conversation tree, not just the active leaf.
+- Project view with `prompt_template` (system prompt) per project plus knowledge-base docs and files.
+- Versioned memory snapshots, inserted on change so the history is preserved.
+- Lazy thumbnail fetch for uploaded images per message.
+- Star-boosted ranking: starred conversations and starred projects rank higher in search.
+- Read-only against the live API. No writes back to claude.ai.
 
 ## How it works
 
-1. Reads the AES key from macOS Keychain (`Claude Safe Storage`, account `Claude Key`).
-2. Decrypts the `sessionKey` and `cf_clearance` cookies from Claude Desktop's cookie store.
-3. Calls `https://claude.ai/api/organizations/{org}/chat_conversations` with those cookies.
-4. Stores conversation metadata and message bodies in `~/.claude/library/library.db`.
-5. Indexes messages in an FTS5 virtual table for fast search.
+Reads the AES key from the macOS Keychain (`Claude Safe Storage`), decrypts the `sessionKey` and `cf_clearance` cookies from Claude Desktop's cookie store, and calls `claude.ai/api/organizations/...` with those cookies. Responses are validated at the edge with zod and written to the local SQLite cache. Search functions hit FTS5 virtual tables; `kind=tool_calls`, `kind=citations`, and `kind=shares` use direct table queries (see `library_search` description for per-kind semantics).
 
-Sync is incremental. It paginates the full conversation list on every run, but only re-fetches message bodies for conversations whose `updated_at` changed. Use `--full` to force a complete refetch.
-
-`library_search` and `library_list` auto-sync if the cache is older than 24 hours. Pass `noSync: true` to skip the freshness check.
+Sync is incremental. Paginates the conversation list every run, fetches message bodies only for conversations whose `updated_at` advanced. Pass `full=true` to force a complete refetch. `library_search` and `library_list` auto-sync if the cache is older than 24 hours.
 
 ## Caveats
 
-- macOS only. Uses the `security` CLI and Chromium-format cookie store. Linux and Windows need a different cookie path.
-- Touches your real Claude session. Treat the cache as sensitive.
 - SSO-only orgs return 403 with personal session cookies. Library skips them gracefully.
-- When the session cookie expires, library surfaces a clear "session expired" error. Open Claude Desktop and sign in to refresh the cookie, then retry.
+- When the session cookie expires, library surfaces a clear "session expired" error. Open Claude Desktop and sign in to refresh, then retry.
+- Treat the cache as sensitive. It contains your full Claude Desktop history including memory and project system prompts.
+
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md).
+
+## Credits
+
+- [Mischa Sigtermans](https://github.com/mischasigtermans)
 
 ## License
 
-MIT
+MIT. See [LICENSE](LICENSE).

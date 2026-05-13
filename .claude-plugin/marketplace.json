@@ -3,13 +3,13 @@
   "owner": { "name": "Mischa Sigtermans" },
   "metadata": {
     "description": "Local searchable mirror of your Claude Desktop conversations, projects, files, memory, and artifacts.",
-    "version": "0.1.0"
+    "version": "0.2.1"
   },
   "plugins": [
     {
       "name": "library",
       "description": "Search your Claude Desktop library via MCP.",
-      "version": "0.1.0",
+      "version": "0.2.1",
       "author": { "name": "Mischa Sigtermans" }
     }
   ]

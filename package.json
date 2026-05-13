@@ -1,6 +1,6 @@
 {
   "name": "library",
-  "version": "0.1.0",
+  "version": "0.2.1",
   "description": "Claude Library: a local searchable mirror of your Claude Desktop conversations, projects, files, memory, and artifacts, exposed via MCP.",
   "license": "MIT",
   "author": {
