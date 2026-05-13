@@ -1,7 +1,7 @@
 import Database from 'better-sqlite3';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { mkdirSync } from 'node:fs';
+import { existsSync, mkdirSync, renameSync } from 'node:fs';
 import type {
   ConversationFull,
   ConversationSummary,
@@ -12,8 +12,26 @@ import type {
 
 const CACHE_DIR = join(homedir(), '.claude', 'library');
 const DB_PATH = join(CACHE_DIR, 'library.db');
+const LEGACY_DIR = join(homedir(), '.claude', 'hansard');
+const LEGACY_DB = join(LEGACY_DIR, 'hansard.db');
+
+function migrateFromHansard(): void {
+  if (existsSync(DB_PATH) || !existsSync(LEGACY_DB)) return;
+  try {
+    mkdirSync(CACHE_DIR, { recursive: true });
+    renameSync(LEGACY_DB, DB_PATH);
+    for (const ext of ['-shm', '-wal']) {
+      const src = LEGACY_DB + ext;
+      if (existsSync(src)) renameSync(src, DB_PATH + ext);
+    }
+    process.stderr.write('library: migrated cache from ~/.claude/hansard/ (legacy hansard plugin layout)\n');
+  } catch (err) {
+    process.stderr.write(`library: migrate from hansard failed, starting fresh (${err instanceof Error ? err.message : String(err)})\n`);
+  }
+}
 
 function open(): Database.Database {
+  migrateFromHansard();
   mkdirSync(CACHE_DIR, { recursive: true });
   const db = new Database(DB_PATH);
   db.pragma('journal_mode = WAL');
