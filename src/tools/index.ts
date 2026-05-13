@@ -239,6 +239,7 @@ async function autoSyncIfStale(): Promise<string | null> {
   if (last && Date.now() - new Date(last).getTime() < STALE_MS) return null;
   try {
     const results = await performSync({ full: false });
+    setMeta('last_auto_sync_error', '');
     const totals = results.reduce(
       (a, r) => a + (r.skipped ? 0 : r.newConvos + r.updatedConvos),
       0,
@@ -246,7 +247,9 @@ async function autoSyncIfStale(): Promise<string | null> {
     if (totals === 0) return null;
     return `(auto-synced ${totals} new/updated conversations)`;
   } catch (err) {
-    return `(auto-sync failed: ${err instanceof Error ? err.message.split('\n')[0] : String(err)})`;
+    const msg = err instanceof Error ? err.message.split('\n')[0] : String(err);
+    setMeta('last_auto_sync_error', JSON.stringify({ at: new Date().toISOString(), message: msg.slice(0, 300) }));
+    return `(auto-sync failed: ${msg})`;
   }
 }
 
@@ -677,14 +680,24 @@ const status: Tool = {
     const lastFull = getMeta('last_sync_completed_at');
     const projectCount = listProjectsCached().length;
     const docCount = totalDocs();
-    return [
+    const lines = [
       `auth: ${auth}`,
       `cached conversations: ${total}`,
       `cached projects: ${projectCount}`,
       `cached project docs: ${docCount}`,
       `last conversation sync: ${last ? fmtDate(last) : 'never'}`,
       `last full sync run: ${lastFull ? fmtDate(lastFull) : 'never'}`,
-    ].join('\n');
+    ];
+    const autoSyncError = getMeta('last_auto_sync_error');
+    if (autoSyncError) {
+      try {
+        const e = JSON.parse(autoSyncError) as { at: string; message: string };
+        lines.push(`auto-sync error (at ${fmtDate(e.at)}): ${e.message}`);
+      } catch {
+        // malformed meta value, ignore
+      }
+    }
+    return lines.join('\n');
   },
 };
 
