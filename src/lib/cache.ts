@@ -426,12 +426,16 @@ function upsertMessageBlocks(msgs: Message[], conversationUuid: string): void {
             );
           }
         }
-
-        if (m.sender === 'assistant' && text) {
-          upsertArtifacts(m.uuid, conversationUuid, m.created_at, text);
-        }
       }
     });
+
+    if (m.sender === 'assistant' && m.content) {
+      const allText = m.content
+        .filter((b) => b.type === 'text' && b.text)
+        .map((b) => b.text as string)
+        .join('\n');
+      if (allText) upsertArtifacts(m.uuid, conversationUuid, m.created_at, allText);
+    }
   }
 }
 
