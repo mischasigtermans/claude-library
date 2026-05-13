@@ -1,9 +1,10 @@
 import Database from 'better-sqlite3';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { existsSync, mkdirSync, renameSync } from 'node:fs';
+import { mkdirSync } from 'node:fs';
 import type {
   Block,
+  Citation,
   ConversationFull,
   ConversationSummary,
   Message,
@@ -16,8 +17,6 @@ import type {
 
 const CACHE_DIR = join(homedir(), '.claude', 'library');
 const DB_PATH = join(CACHE_DIR, 'library.db');
-const LEGACY_DIR = join(homedir(), '.claude', 'hansard');
-const LEGACY_DB = join(LEGACY_DIR, 'hansard.db');
 
 function ensureColumns(
   d: Database.Database,
@@ -44,23 +43,7 @@ function replaceChildren<T>(
   for (const row of rows) inserter(row);
 }
 
-function migrateFromHansard(): void {
-  if (existsSync(DB_PATH) || !existsSync(LEGACY_DB)) return;
-  try {
-    mkdirSync(CACHE_DIR, { recursive: true });
-    renameSync(LEGACY_DB, DB_PATH);
-    for (const ext of ['-shm', '-wal']) {
-      const src = LEGACY_DB + ext;
-      if (existsSync(src)) renameSync(src, DB_PATH + ext);
-    }
-    process.stderr.write('library: migrated cache from ~/.claude/hansard/ (legacy hansard plugin layout)\n');
-  } catch (err) {
-    process.stderr.write(`library: migrate from hansard failed, starting fresh (${err instanceof Error ? err.message : String(err)})\n`);
-  }
-}
-
 function open(): Database.Database {
-  migrateFromHansard();
   mkdirSync(CACHE_DIR, { recursive: true });
   const db = new Database(DB_PATH);
   db.pragma('journal_mode = WAL');
@@ -358,6 +341,8 @@ export function upsertConversation(orgId: string, c: ConversationSummary): void 
     });
 }
 
+const warnedCitationDrop = new Set<string>();
+
 function isKnownBlock(b: { type: string }): b is Block {
   return b.type === 'text' || b.type === 'thinking' || b.type === 'tool_use' || b.type === 'tool_result';
 }
@@ -442,19 +427,26 @@ function upsertMessageBlocks(msgs: Message[], conversationUuid: string): void {
       if (block.type === 'text') {
         const citations = block.citations;
         if (citations) {
-          for (const cit of citations) {
-            const meta = (cit.metadata as Record<string, unknown> | undefined) ?? {};
+          for (const cit of (citations as Citation[])) {
+            if (!cit.uuid) {
+              const key = `${m.uuid}-${pos}`;
+              if (!warnedCitationDrop.has(key)) {
+                warnedCitationDrop.add(key);
+                process.stderr.write(`library: citation without uuid in block ${key}, skipping.\n`);
+              }
+              continue;
+            }
             insCitation.run(
-              cit.uuid as string,
+              cit.uuid,
               m.uuid,
               pos,
-              (cit.title as string | undefined) ?? null,
-              (cit.url as string | undefined) ?? null,
-              (meta.site_domain as string | undefined) ?? null,
-              (meta.site_name as string | undefined) ?? null,
-              (cit.origin_tool_name as string | undefined) ?? null,
-              (cit.start_index as number | undefined) ?? null,
-              (cit.end_index as number | undefined) ?? null,
+              cit.title ?? null,
+              cit.url ?? null,
+              cit.metadata?.site_domain ?? null,
+              cit.metadata?.site_name ?? null,
+              cit.origin_tool_name ?? null,
+              cit.start_index ?? null,
+              cit.end_index ?? null,
             );
           }
         }
@@ -567,7 +559,17 @@ export function upsertMessageFiles(messageUuid: string, files: MessageFile[]): v
   const ins = db().prepare(
     `INSERT INTO message_files (uuid, message_uuid, file_kind, file_name, thumbnail_url, preview_url,
        primary_color, width, height, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(uuid) DO UPDATE SET
+       message_uuid=excluded.message_uuid,
+       file_kind=excluded.file_kind,
+       file_name=excluded.file_name,
+       thumbnail_url=excluded.thumbnail_url,
+       preview_url=excluded.preview_url,
+       primary_color=excluded.primary_color,
+       width=excluded.width,
+       height=excluded.height,
+       created_at=excluded.created_at`,
   );
   replaceChildren(db(), 'message_files', 'message_uuid', messageUuid, files, (f) => {
     const asset = f.thumbnail_asset ?? {};
@@ -601,7 +603,7 @@ export function upsertMessages(convo: ConversationFull): void {
         m.input_mode ?? null,
         m.stop_reason ?? null,
         m.truncated ? 1 : 0,
-        m.compaction_summary ?? null,
+        m.compaction_summary == null ? null : typeof m.compaction_summary === 'string' ? m.compaction_summary : JSON.stringify(m.compaction_summary),
       );
     });
     upsertMessageBlocks(msgs, convo.uuid);
@@ -643,9 +645,9 @@ export function upsertProject(orgId: string, p: ProjectExtended): void {
       archived_at: p.archived_at ?? null,
       synced_at: new Date().toISOString(),
       prompt_template: p.prompt_template || null,
-      is_harmony_project: p.is_harmony_project ? 1 : null,
-      docs_count: p.docs_count ?? null,
-      files_count: p.files_count ?? null,
+      is_harmony_project: p.is_harmony_project ? 1 : 0,
+      docs_count: p.docs_count ?? 0,
+      files_count: p.files_count ?? 0,
     });
 }
 
