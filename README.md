@@ -58,7 +58,7 @@ See [CHANGELOG.md](CHANGELOG.md).
 
 ## Credits
 
-- [Mischa Sigtermans](https://github.com/mischasigtermans)
+- [Mischa Sigtermans](https://mischa.sigtermans.me)
 
 ## License
 
