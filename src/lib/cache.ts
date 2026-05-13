@@ -693,13 +693,14 @@ export function getProjectCached(nameOrUuid: string): (ProjectWithCount & { prom
     .get(lower, nameOrUuid) as (ProjectWithCount & { prompt_template?: string | null }) | undefined;
 }
 
-export function insertMemorySnapshot(orgId: string, memory: string, controlsJson: string | null, remoteUpdatedAt: string): void {
-  db()
+export function insertMemorySnapshot(orgId: string, memory: string, controlsJson: string | null, remoteUpdatedAt: string): boolean {
+  const result = db()
     .prepare(
       `INSERT OR IGNORE INTO memory_snapshots (org_id, memory, controls_json, remote_updated_at, fetched_at)
        VALUES (?, ?, ?, ?, ?)`,
     )
     .run(orgId, memory, controlsJson, remoteUpdatedAt, new Date().toISOString());
+  return result.changes === 1;
 }
 
 export interface MemorySnapshot {

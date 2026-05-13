@@ -73,6 +73,7 @@ interface SyncStats {
   newMessages: number;
   projects: number;
   docs: number;
+  memorySnapshots?: number;
   skipped?: string;
   failureSamples: string[];
 }
@@ -137,12 +138,13 @@ async function syncOrg(
 
   try {
     const mem = await getOrgMemory(cookies, org.uuid);
-    insertMemorySnapshot(
+    const isNew = insertMemorySnapshot(
       org.uuid,
       mem.memory,
       mem.controls !== null && mem.controls !== undefined ? JSON.stringify(mem.controls) : null,
       mem.updated_at,
     );
+    if (isNew) stats.memorySnapshots = (stats.memorySnapshots ?? 0) + 1;
   } catch (err) {
     if (err instanceof SessionExpiredError) throw err;
   }
@@ -215,6 +217,7 @@ function formatSyncReport(results: SyncStats[]): string {
     }
     lines.push(
       `  ${r.org}: ${r.newConvos} new, ${r.updatedConvos} updated, ${r.unchangedConvos} unchanged, ${r.projects} projects, ${r.docs} project docs` +
+        (r.memorySnapshots ? `, ${r.memorySnapshots} new memory snapshot${r.memorySnapshots !== 1 ? 's' : ''}` : '') +
         (r.failedConvos ? `, ${r.failedConvos} failed` : ''),
     );
     for (const sample of r.failureSamples) {
