@@ -1085,52 +1085,66 @@ export interface ArtifactSearchHit {
   rank: number;
 }
 
+export interface ArtifactListRow {
+  artifact_uuid: string;
+  message_uuid: string;
+  conversation_uuid: string;
+  conversation_name: string;
+  artifact_type: string | null;
+  title: string | null;
+  line_count: number;
+  created_at: string | null;
+  snippet: string;
+}
+
 export function searchArtifacts(opts: {
-  query?: string;
+  query: string;
   type?: string;
   convo?: string;
   limit?: number;
 }): ArtifactSearchHit[] {
-  const limit = opts.limit ?? 25;
+  const where: string[] = ['artifacts_fts MATCH ?'];
+  const args: unknown[] = [opts.query];
+  if (opts.type) { where.push('f.artifact_type = ?'); args.push(opts.type); }
+  if (opts.convo) { where.push('f.conversation_uuid = ?'); args.push(opts.convo); }
+  args.push(opts.limit ?? 25);
+  return db()
+    .prepare(
+      `SELECT
+         f.artifact_uuid AS artifact_uuid,
+         f.message_uuid AS message_uuid,
+         f.conversation_uuid AS conversation_uuid,
+         c.name AS conversation_name,
+         c.is_starred AS conv_starred,
+         f.artifact_type AS artifact_type,
+         f.title AS title,
+         a.line_count AS line_count,
+         a.created_at AS created_at,
+         snippet(artifacts_fts, 0, '«', '»', '…', 16) AS snippet,
+         (bm25(artifacts_fts)
+           - CASE WHEN c.is_starred=1 THEN 5.0 ELSE 0 END
+           - CASE WHEN p.is_starred=1 THEN 2.0 ELSE 0 END) AS rank
+       FROM artifacts_fts f
+       JOIN artifacts a ON a.uuid = f.artifact_uuid
+       JOIN conversations c ON c.uuid = f.conversation_uuid
+       LEFT JOIN projects p ON p.uuid = c.project_uuid
+       WHERE ${where.join(' AND ')}
+       ORDER BY rank LIMIT ?`,
+    )
+    .all(...args) as ArtifactSearchHit[];
+}
 
-  if (opts.query) {
-    const where: string[] = ['artifacts_fts MATCH ?'];
-    const args: unknown[] = [opts.query];
-    if (opts.type) { where.push('f.artifact_type = ?'); args.push(opts.type); }
-    if (opts.convo) { where.push('f.conversation_uuid = ?'); args.push(opts.convo); }
-    args.push(limit);
-    return db()
-      .prepare(
-        `SELECT
-           f.artifact_uuid AS artifact_uuid,
-           f.message_uuid AS message_uuid,
-           f.conversation_uuid AS conversation_uuid,
-           c.name AS conversation_name,
-           c.is_starred AS conv_starred,
-           f.artifact_type AS artifact_type,
-           f.title AS title,
-           a.line_count AS line_count,
-           a.created_at AS created_at,
-           snippet(artifacts_fts, 0, '«', '»', '…', 16) AS snippet,
-           (bm25(artifacts_fts)
-             - CASE WHEN c.is_starred=1 THEN 5.0 ELSE 0 END
-             - CASE WHEN p.is_starred=1 THEN 2.0 ELSE 0 END) AS rank
-         FROM artifacts_fts f
-         JOIN artifacts a ON a.uuid = f.artifact_uuid
-         JOIN conversations c ON c.uuid = f.conversation_uuid
-         LEFT JOIN projects p ON p.uuid = c.project_uuid
-         WHERE ${where.join(' AND ')}
-         ORDER BY rank LIMIT ?`,
-      )
-      .all(...args) as ArtifactSearchHit[];
-  }
-
+export function listArtifacts(opts: {
+  type?: string;
+  convo?: string;
+  limit?: number;
+}): ArtifactListRow[] {
   const where: string[] = [];
   const args: unknown[] = [];
   if (opts.type) { where.push('a.artifact_type = ?'); args.push(opts.type); }
   if (opts.convo) { where.push('a.conversation_uuid = ?'); args.push(opts.convo); }
   const whereClause = where.length ? `WHERE ${where.join(' AND ')}` : '';
-  args.push(limit);
+  args.push(opts.limit ?? 25);
   return db()
     .prepare(
       `SELECT
@@ -1142,14 +1156,13 @@ export function searchArtifacts(opts: {
          a.title AS title,
          a.line_count AS line_count,
          a.created_at AS created_at,
-         substr(a.content, 1, 120) AS snippet,
-         0 AS rank
+         substr(a.content, 1, 120) AS snippet
        FROM artifacts a
        JOIN conversations c ON c.uuid = a.conversation_uuid
        ${whereClause}
        ORDER BY a.created_at DESC LIMIT ?`,
     )
-    .all(...args) as ArtifactSearchHit[];
+    .all(...args) as ArtifactListRow[];
 }
 
 export interface ArtifactFull {
