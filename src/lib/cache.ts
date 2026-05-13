@@ -6,6 +6,7 @@ import type {
   ConversationFull,
   ConversationSummary,
   Message,
+  MessageFile,
   Project,
   ProjectDoc,
 } from './api.js';
@@ -161,6 +162,38 @@ function open(): Database.Database {
     CREATE TRIGGER IF NOT EXISTS message_blocks_ad AFTER DELETE ON message_blocks BEGIN
       DELETE FROM blocks_fts WHERE block_uuid = old.uuid;
     END;
+
+    CREATE TABLE IF NOT EXISTS message_files (
+      uuid TEXT PRIMARY KEY,
+      message_uuid TEXT NOT NULL,
+      file_kind TEXT,
+      file_name TEXT,
+      thumbnail_url TEXT,
+      preview_url TEXT,
+      primary_color TEXT,
+      width INTEGER,
+      height INTEGER,
+      created_at TEXT,
+      FOREIGN KEY(message_uuid) REFERENCES messages(uuid) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS message_files_msg ON message_files(message_uuid);
+    CREATE INDEX IF NOT EXISTS message_files_kind ON message_files(file_kind);
+
+    CREATE TABLE IF NOT EXISTS message_attachments (
+      uuid TEXT PRIMARY KEY,
+      message_uuid TEXT NOT NULL,
+      raw_json TEXT NOT NULL,
+      FOREIGN KEY(message_uuid) REFERENCES messages(uuid) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS message_attachments_msg ON message_attachments(message_uuid);
+
+    CREATE TABLE IF NOT EXISTS file_blobs (
+      file_uuid TEXT NOT NULL,
+      variant TEXT NOT NULL,
+      bytes BLOB NOT NULL,
+      fetched_at TEXT NOT NULL,
+      PRIMARY KEY (file_uuid, variant)
+    );
   `);
   // Backfill columns added after v0.1.0.
   const convoCols = db.prepare('PRAGMA table_info(conversations)').all() as { name: string }[];
@@ -309,6 +342,95 @@ function upsertMessageBlocks(msgs: Message[]): void {
   }
 }
 
+export function upsertMessageFiles(messageUuid: string, files: MessageFile[]): void {
+  db().prepare('DELETE FROM message_files WHERE message_uuid = ?').run(messageUuid);
+  if (files.length === 0) return;
+  const ins = db().prepare(
+    `INSERT INTO message_files (uuid, message_uuid, file_kind, file_name, thumbnail_url, preview_url,
+       primary_color, width, height, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  );
+  for (const f of files) {
+    const asset = f.thumbnail_asset ?? {};
+    ins.run(
+      f.uuid ?? f.file_uuid,
+      messageUuid,
+      f.file_kind ?? null,
+      f.file_name ?? null,
+      f.thumbnail_url ?? null,
+      f.preview_url ?? null,
+      asset.primary_color ?? null,
+      asset.image_width ?? null,
+      asset.image_height ?? null,
+      f.created_at ?? null,
+    );
+  }
+}
+
+export function upsertMessageAttachments(messageUuid: string, atts: unknown[]): void {
+  db().prepare('DELETE FROM message_attachments WHERE message_uuid = ?').run(messageUuid);
+  if (atts.length === 0) return;
+  const ins = db().prepare(
+    'INSERT INTO message_attachments (uuid, message_uuid, raw_json) VALUES (?, ?, ?)',
+  );
+  atts.forEach((a, i) => {
+    const att = a as Record<string, unknown>;
+    const uuid = (att.uuid as string | undefined) ?? `${messageUuid}-att-${i}`;
+    ins.run(uuid, messageUuid, JSON.stringify(a));
+  });
+}
+
+export function getFileBlob(fileUuid: string, variant: string): Buffer | undefined {
+  const row = db()
+    .prepare('SELECT bytes FROM file_blobs WHERE file_uuid = ? AND variant = ?')
+    .get(fileUuid, variant) as { bytes: Buffer } | undefined;
+  return row?.bytes;
+}
+
+export function setFileBlob(fileUuid: string, variant: string, bytes: Buffer): void {
+  db()
+    .prepare(
+      'INSERT INTO file_blobs (file_uuid, variant, bytes, fetched_at) VALUES (?, ?, ?, ?) ON CONFLICT(file_uuid, variant) DO UPDATE SET bytes = excluded.bytes, fetched_at = excluded.fetched_at',
+    )
+    .run(fileUuid, variant, bytes, new Date().toISOString());
+}
+
+export interface FileBlobTarget {
+  file_uuid: string;
+  message_uuid: string;
+  conversation_uuid: string;
+  file_kind: string | null;
+}
+
+export function listFilesNeedingBlob(opts: {
+  variant: string;
+  kinds?: string[];
+  convoUuid?: string;
+  limit?: number;
+} = { variant: 'thumbnail' }): FileBlobTarget[] {
+  const where: string[] = ['NOT EXISTS (SELECT 1 FROM file_blobs fb WHERE fb.file_uuid = mf.uuid AND fb.variant = ?)'];
+  const args: unknown[] = [opts.variant];
+  if (opts.kinds && opts.kinds.length > 0) {
+    where.push(`mf.file_kind IN (${opts.kinds.map(() => '?').join(',')})`);
+    args.push(...opts.kinds);
+  }
+  if (opts.convoUuid) {
+    where.push('m.conversation_uuid = ?');
+    args.push(opts.convoUuid);
+  }
+  args.push(opts.limit ?? 50);
+  return db()
+    .prepare(
+      `SELECT mf.uuid AS file_uuid, mf.message_uuid, m.conversation_uuid, mf.file_kind
+       FROM message_files mf
+       JOIN messages m ON m.uuid = mf.message_uuid
+       JOIN conversations c ON c.uuid = m.conversation_uuid
+       WHERE ${where.join(' AND ')}
+       ORDER BY c.updated_at DESC LIMIT ?`,
+    )
+    .all(...args) as FileBlobTarget[];
+}
+
 export function upsertMessages(convo: ConversationFull): void {
   const tx = db().transaction((msgs: Message[]) => {
     db().prepare('DELETE FROM messages WHERE conversation_uuid = ?').run(convo.uuid);
@@ -328,6 +450,10 @@ export function upsertMessages(convo: ConversationFull): void {
       );
     });
     upsertMessageBlocks(msgs);
+    for (const m of msgs) {
+      if (m.files && m.files.length > 0) upsertMessageFiles(m.uuid, m.files);
+      if (m.attachments && m.attachments.length > 0) upsertMessageAttachments(m.uuid, m.attachments);
+    }
     db()
       .prepare(
         'UPDATE conversations SET messages_synced = 1, messages_synced_for = ?, synced_at = ? WHERE uuid = ?',

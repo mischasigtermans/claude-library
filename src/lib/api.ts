@@ -60,6 +60,25 @@ export interface ConversationSummary {
   project?: { uuid: string; name: string } | null;
 }
 
+export interface MessageFileAsset {
+  url?: string;
+  primary_color?: string;
+  image_width?: number;
+  image_height?: number;
+}
+
+export interface MessageFile {
+  uuid: string;
+  file_uuid?: string;
+  file_kind?: string;
+  file_name?: string;
+  thumbnail_url?: string;
+  preview_url?: string;
+  thumbnail_asset?: MessageFileAsset;
+  preview_asset?: MessageFileAsset;
+  created_at?: string;
+}
+
 export interface Message {
   uuid: string;
   text: string;
@@ -70,7 +89,7 @@ export interface Message {
   updated_at: string;
   parent_message_uuid?: string;
   attachments?: unknown[];
-  files?: unknown[];
+  files?: MessageFile[];
   sync_sources?: unknown[];
   truncated?: boolean;
   input_mode?: string;
@@ -156,4 +175,22 @@ export function listProjectDocs(
   projectId: string,
 ): Promise<ProjectDoc[]> {
   return call<ProjectDoc[]>(c, `/api/organizations/${orgId}/projects/${projectId}/docs`);
+}
+
+export async function fetchFileBlob(
+  c: ClaudeCookies,
+  orgId: string,
+  fileUuid: string,
+  variant: 'thumbnail' | 'preview',
+): Promise<Buffer> {
+  const r = await fetch(`${BASE}/api/${orgId}/files/${fileUuid}/${variant}`, {
+    headers: {
+      Cookie: cookieHeader(c),
+      'User-Agent': UA,
+      Referer: `${BASE}/`,
+    },
+  });
+  if (r.status === 401) throw new SessionExpiredError();
+  if (!r.ok) throw new Error(`library: ${r.status} on file blob ${fileUuid}/${variant}`);
+  return Buffer.from(await r.arrayBuffer());
 }
