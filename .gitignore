@@ -1,4 +1,15 @@
 node_modules/
-dist/
+
+# OS
 .DS_Store
+._*
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Logs
 *.log
