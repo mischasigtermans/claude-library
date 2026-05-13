@@ -9,6 +9,7 @@ import {
   listProjectDocs,
   listProjectFiles,
   listProjects,
+  listShares as apiListShares,
   SessionExpiredError,
   type Org,
 } from '../lib/api.js';
@@ -28,6 +29,7 @@ import {
   listFilesNeedingBlob,
   listMemorySnapshots,
   listProjectsCached,
+  listShares as cacheListShares,
   queryCitations,
   queryToolCalls,
   replaceProjectDocs,
@@ -43,6 +45,7 @@ import {
   upsertProject,
   upsertProjectExtended,
   upsertProjectFiles,
+  upsertShare,
 } from '../lib/cache.js';
 
 export interface Tool {
@@ -131,6 +134,13 @@ async function syncOrg(
       mem.controls !== null && mem.controls !== undefined ? JSON.stringify(mem.controls) : null,
       mem.updated_at,
     );
+  } catch (err) {
+    if (err instanceof SessionExpiredError) throw err;
+  }
+
+  try {
+    const shares = await apiListShares(cookies, org.uuid);
+    for (const s of shares) upsertShare(org.uuid, s);
   } catch (err) {
     if (err instanceof SessionExpiredError) throw err;
   }
@@ -655,4 +665,31 @@ const fetchFiles: Tool = {
   },
 };
 
-export const tools: Tool[] = [sync, list, search, outline, get, doc, projects, projectDetail, status, toolCalls, citations, fetchFiles, memory, memoryHistory];
+const shares: Tool = {
+  name: 'library_shares',
+  description:
+    'List shared conversation snapshots (share links you have created). Optionally filter by conversation UUID.',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      convo: { type: 'string', description: 'Conversation UUID to filter by.' },
+    },
+  },
+  handler: async (args) => {
+    const convoUuid = typeof args.convo === 'string' ? args.convo : undefined;
+    const rows = cacheListShares({ convoUuid });
+    if (rows.length === 0) return 'No shares cached. Run library_sync first.';
+    const body = rows
+      .map((s) => {
+        const name = s.snapshot_name ? trim(s.snapshot_name, 50) : '(unnamed)';
+        const convo = s.conversation_name ? trim(s.conversation_name, 50) : (s.conversation_uuid ?? '-');
+        const idx = s.last_message_index !== null ? ` (up to msg ${s.last_message_index})` : '';
+        const date = s.created_at ? fmtDate(s.created_at) : '-';
+        return `  ${date}  ${name.padEnd(52)}  ${convo}${idx}\n           ${s.uuid}`;
+      })
+      .join('\n');
+    return `${rows.length} share(s):\n${body}`;
+  },
+};
+
+export const tools: Tool[] = [sync, list, search, outline, get, doc, projects, projectDetail, status, toolCalls, citations, fetchFiles, memory, memoryHistory, shares];

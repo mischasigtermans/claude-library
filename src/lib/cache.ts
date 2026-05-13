@@ -10,6 +10,7 @@ import type {
   Project,
   ProjectExtended,
   ProjectDoc,
+  Share,
 } from './api.js';
 
 const CACHE_DIR = join(homedir(), '.claude', 'library');
@@ -230,6 +231,20 @@ function open(): Database.Database {
     CREATE TRIGGER IF NOT EXISTS memory_ad AFTER DELETE ON memory_snapshots BEGIN
       DELETE FROM memory_fts WHERE snapshot_id = old.id;
     END;
+
+    CREATE TABLE IF NOT EXISTS shares (
+      uuid TEXT PRIMARY KEY,
+      org_id TEXT NOT NULL,
+      snapshot_name TEXT,
+      conversation_uuid TEXT,
+      project_uuid TEXT,
+      last_message_index INTEGER,
+      created_at TEXT,
+      updated_at TEXT,
+      synced_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS shares_org ON shares(org_id);
+    CREATE INDEX IF NOT EXISTS shares_convo ON shares(conversation_uuid);
   `);
   // Backfill columns added after v0.1.0.
   const convoCols = db.prepare('PRAGMA table_info(conversations)').all() as { name: string }[];
@@ -655,6 +670,55 @@ export function searchMemory(query: string, limit = 5): MemorySearchHit[] {
        ORDER BY rank LIMIT ?`,
     )
     .all(query, limit) as MemorySearchHit[];
+}
+
+export function upsertShare(orgId: string, s: Share): void {
+  db()
+    .prepare(
+      `INSERT INTO shares (uuid, org_id, snapshot_name, conversation_uuid, project_uuid, last_message_index, created_at, updated_at, synced_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(uuid) DO UPDATE SET
+         snapshot_name=excluded.snapshot_name, conversation_uuid=excluded.conversation_uuid,
+         project_uuid=excluded.project_uuid, last_message_index=excluded.last_message_index,
+         updated_at=excluded.updated_at, synced_at=excluded.synced_at`,
+    )
+    .run(
+      s.uuid,
+      orgId,
+      s.snapshot_name ?? null,
+      s.conversation_uuid ?? null,
+      s.project_uuid ?? null,
+      s.last_message_index ?? null,
+      s.created_at ?? null,
+      s.updated_at ?? null,
+      new Date().toISOString(),
+    );
+}
+
+export interface CachedShare {
+  uuid: string;
+  org_id: string;
+  snapshot_name: string | null;
+  conversation_uuid: string | null;
+  conversation_name: string | null;
+  project_uuid: string | null;
+  last_message_index: number | null;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
+export function listShares(opts: { convoUuid?: string } = {}): CachedShare[] {
+  const where = opts.convoUuid ? 'WHERE s.conversation_uuid = ?' : '';
+  const args = opts.convoUuid ? [opts.convoUuid] : [];
+  return db()
+    .prepare(
+      `SELECT s.*, c.name AS conversation_name
+       FROM shares s
+       LEFT JOIN conversations c ON c.uuid = s.conversation_uuid
+       ${where}
+       ORDER BY s.created_at DESC`,
+    )
+    .all(...args) as CachedShare[];
 }
 
 export function getConversationFreshness(uuid: string): { updated_at: string; messages_synced_for: string | null } | undefined {

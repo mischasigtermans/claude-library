@@ -208,6 +208,20 @@ export function listProjectDocs(
   return call<ProjectDoc[]>(c, `/api/organizations/${orgId}/projects/${projectId}/docs`);
 }
 
+export interface Share {
+  uuid: string;
+  snapshot_name?: string;
+  conversation_uuid?: string | null;
+  project_uuid?: string | null;
+  last_message_index?: number | null;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export function listShares(c: ClaudeCookies, orgId: string): Promise<Share[]> {
+  return call<Share[]>(c, `/api/organizations/${orgId}/shares`);
+}
+
 export interface OrganizationMemory {
   memory: string;
   controls: unknown;
