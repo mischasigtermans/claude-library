@@ -1,0 +1,10 @@
+{
+  "name": "library",
+  "description": "Claude Library: searchable local mirror of your Claude Desktop conversations, projects, files, memory, and artifacts, exposed via MCP.",
+  "version": "0.1.0",
+  "author": {
+    "name": "Mischa Sigtermans"
+  },
+  "repository": "https://github.com/mischasigtermans/claude-library",
+  "keywords": ["mcp", "claude-desktop", "library", "search", "memory", "artifacts"]
+}

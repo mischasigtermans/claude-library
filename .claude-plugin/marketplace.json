@@ -1,0 +1,16 @@
+{
+  "name": "library",
+  "owner": { "name": "Mischa Sigtermans" },
+  "metadata": {
+    "description": "Local searchable mirror of your Claude Desktop conversations, projects, files, memory, and artifacts.",
+    "version": "0.1.0"
+  },
+  "plugins": [
+    {
+      "name": "library",
+      "description": "Search your Claude Desktop library via MCP.",
+      "version": "0.1.0",
+      "author": { "name": "Mischa Sigtermans" }
+    }
+  ]
+}
