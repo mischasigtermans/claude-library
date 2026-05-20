@@ -77,14 +77,14 @@ Call `library_list` with `limit` and optional `project`. Default limit 25. Print
 
 Call `library_search` with the query. Optionally pass `kind` to restrict to one source:
 
-- `all` (default) — messages, docs, memory, artifacts
-- `messages` — conversation message bodies only
-- `docs` — project knowledge-base documents only
-- `memory` — organization memory snapshots (no query = list all snapshots)
-- `artifacts` — extracted code blocks and antArtifact tags
-- `tool_calls` — tool invocations (query matches tool name)
-- `citations` — web citations (query matches title, URL, site name)
-- `shares` — shared conversation snapshots
+- `all` (default): messages, docs, memory, artifacts
+- `messages`: conversation message bodies only
+- `docs`: project knowledge-base documents only
+- `memory`: organization memory snapshots (no query = list all snapshots)
+- `artifacts`: extracted code blocks and antArtifact tags
+- `tool_calls`: tool invocations (query matches tool name)
+- `citations`: web citations (query matches title, URL, site name)
+- `shares`: shared conversation snapshots
 
 ### `projects [--name NAME] [--detail]`
 

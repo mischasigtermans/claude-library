@@ -24822,7 +24822,7 @@ var open2 = {
       const to = args.to !== undefined ? Number(args.to) : msgs.length;
       msgs = msgs.slice(from, to);
       const head = `# ${meta3.name}
-_${fmtDate(meta3.created_at)} → ${fmtDate(meta3.updated_at)}, ${meta3.message_count} messages, showing ${from}–${from + msgs.length - 1}_
+_${fmtDate(meta3.created_at)} → ${fmtDate(meta3.updated_at)}, ${meta3.message_count} messages, showing ${from}-${from + msgs.length - 1}_
 `;
       const body = msgs.map((m) => `
 ## ${m.sender} [${m.idx}]
@@ -24994,7 +24994,7 @@ var tools = [sync, list, search2, outline, open2, projects, status];
 
 // src/server.ts
 async function main() {
-  const server = new Server({ name: "library", version: "0.1.0" }, { capabilities: { tools: {} } });
+  const server = new Server({ name: "library", version: "0.2.3" }, { capabilities: { tools: {} } });
   const byName = new Map(tools.map((t) => [t.name, t]));
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
     tools: tools.map((t) => ({

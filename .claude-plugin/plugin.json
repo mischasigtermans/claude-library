@@ -1,6 +1,6 @@
 {
   "name": "library",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "Local searchable mirror of your Claude chats, readable from any Claude Code session.",
   "author": { "name": "Mischa Sigtermans" },
   "homepage": "https://github.com/mischasigtermans/claude-library",

@@ -550,7 +550,7 @@ const open: Tool = {
       const from = Number(args.from ?? 0);
       const to = args.to !== undefined ? Number(args.to) : msgs.length;
       msgs = msgs.slice(from, to);
-      const head = `# ${meta.name}\n_${fmtDate(meta.created_at)} → ${fmtDate(meta.updated_at)}, ${meta.message_count} messages, showing ${from}–${from + msgs.length - 1}_\n`;
+      const head = `# ${meta.name}\n_${fmtDate(meta.created_at)} → ${fmtDate(meta.updated_at)}, ${meta.message_count} messages, showing ${from}-${from + msgs.length - 1}_\n`;
       const body = msgs.map((m) => `\n## ${m.sender} [${m.idx}]\n\n${m.text}`).join('\n');
       return head + body;
     }

@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.2.3] - 2026-05-20
+
+**Fixed**
+- MCP server now reports the correct version. The `Server` constructor was still hardcoded to `0.1.0` and surfaced that to every client on introspection.
+
+**Changed**
+- Dropped the stale `jq` / SessionStart hook requirement from the README. No hook ships in the plugin.
+- Removed `.claude-plugin/marketplace.json` from the plugin repo. The marketplace catalog lives in `mischasigtermans/by-mischa`; the duplicate here had a stale version and no `source` field.
+
 ## [0.2.2] - 2026-05-13
 
 **Fixed**

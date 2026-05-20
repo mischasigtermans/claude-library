@@ -8,7 +8,7 @@ import { tools } from './tools/index.js';
 
 async function main() {
   const server = new Server(
-    { name: 'library', version: '0.1.0' },
+    { name: 'library', version: '0.2.3' },
     { capabilities: { tools: {} } },
   );
 
