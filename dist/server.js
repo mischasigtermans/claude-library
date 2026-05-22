@@ -17823,7 +17823,7 @@ function finalize(ctx, schema) {
     result.$schema = "http://json-schema.org/draft-07/schema#";
   } else if (ctx.target === "draft-04") {
     result.$schema = "http://json-schema.org/draft-04/schema#";
-  } else if (ctx.target === "openapi-3.0") {} else {}
+  } else if (ctx.target === "openapi-3.0") {}
   if (ctx.external?.uri) {
     const id = ctx.external.registry.get(schema)?.id;
     if (!id)
@@ -18067,7 +18067,7 @@ var literalProcessor = (schema, ctx, json, _params) => {
     if (val === undefined) {
       if (ctx.unrepresentable === "throw") {
         throw new Error("Literal `undefined` cannot be represented in JSON Schema");
-      } else {}
+      }
     } else if (typeof val === "bigint") {
       if (ctx.unrepresentable === "throw") {
         throw new Error("BigInt literals cannot be represented in JSON Schema");
@@ -23281,6 +23281,10 @@ function readClaudeCookies() {
     db.close();
   }
 }
+
+// src/lib/api.ts
+import { execFileSync as execFileSync2, execSync } from "node:child_process";
+import { existsSync as existsSync2 } from "node:fs";
 // src/lib/schemas.ts
 var OrgSchema = exports_external.object({
   uuid: exports_external.string(),
@@ -23458,7 +23462,32 @@ var ShareArraySchema = exports_external.array(ShareSchema);
 
 // src/lib/api.ts
 var BASE = "https://claude.ai";
-var UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
+var FALLBACK_UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.7680.216 Electron/41.6.1 Safari/537.36";
+function deriveClaudeDesktopUA() {
+  const app = "/Applications/Claude.app";
+  const fw = `${app}/Contents/Frameworks/Electron Framework.framework/Versions/A/Electron Framework`;
+  if (!existsSync2(fw))
+    return FALLBACK_UA;
+  try {
+    const out = execSync(`strings '${fw}' | grep -m 1 -E 'Chrome/[0-9.]+ Electron/[0-9.]+'`, {
+      encoding: "utf8",
+      timeout: 1e4
+    }).trim();
+    const match = out.match(/Chrome\/(\d+\.\d+\.\d+\.\d+) Electron\/(\d+\.\d+\.\d+)/);
+    if (!match)
+      return FALLBACK_UA;
+    const [, chrome, electron] = match;
+    let claudeVer = "";
+    try {
+      claudeVer = execFileSync2("/usr/libexec/PlistBuddy", ["-c", "Print :CFBundleShortVersionString", `${app}/Contents/Info.plist`], { encoding: "utf8" }).trim();
+    } catch {}
+    const claudePart = claudeVer ? `Claude/${claudeVer} ` : "";
+    return `Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) ${claudePart}Chrome/${chrome} Electron/${electron} Safari/537.36`;
+  } catch {
+    return FALLBACK_UA;
+  }
+}
+var UA = deriveClaudeDesktopUA();
 function cookieHeader(c) {
   const parts = [`sessionKey=${c.sessionKey}`];
   if (c.cfClearance)
@@ -23472,8 +23501,8 @@ class SessionExpiredError extends Error {
     this.name = "SessionExpiredError";
   }
 }
-async function call(c, path, schema) {
-  const r = await fetch(`${BASE}${path}`, {
+async function fetchOnce(c, path) {
+  return fetch(`${BASE}${path}`, {
     headers: {
       Cookie: cookieHeader(c),
       "User-Agent": UA,
@@ -23482,6 +23511,11 @@ async function call(c, path, schema) {
       Referer: `${BASE}/`
     }
   });
+}
+async function call(c, path, schema) {
+  let r = await fetchOnce(c, path);
+  if (r.status === 403)
+    r = await fetchOnce(c, path);
   if (r.status === 401)
     throw new SessionExpiredError;
   if (!r.ok) {
@@ -24994,7 +25028,7 @@ var tools = [sync, list, search2, outline, open2, projects, status];
 
 // src/server.ts
 async function main() {
-  const server = new Server({ name: "library", version: "0.2.3" }, { capabilities: { tools: {} } });
+  const server = new Server({ name: "library", version: "0.2.4" }, { capabilities: { tools: {} } });
   const byName = new Map(tools.map((t) => [t.name, t]));
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
     tools: tools.map((t) => ({

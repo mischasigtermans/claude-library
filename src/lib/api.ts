@@ -1,3 +1,5 @@
+import { execFileSync, execSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import type { z } from 'zod';
 import type { ClaudeCookies } from './auth.js';
 import {
@@ -27,8 +29,37 @@ export type {
 } from './schemas.js';
 
 const BASE = 'https://claude.ai';
-const UA =
-  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
+const FALLBACK_UA =
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.7680.216 Electron/41.6.1 Safari/537.36';
+
+function deriveClaudeDesktopUA(): string {
+  const app = '/Applications/Claude.app';
+  const fw = `${app}/Contents/Frameworks/Electron Framework.framework/Versions/A/Electron Framework`;
+  if (!existsSync(fw)) return FALLBACK_UA;
+  try {
+    const out = execSync(`strings '${fw}' | grep -m 1 -E 'Chrome/[0-9.]+ Electron/[0-9.]+'`, {
+      encoding: 'utf8',
+      timeout: 10_000,
+    }).trim();
+    const match = out.match(/Chrome\/(\d+\.\d+\.\d+\.\d+) Electron\/(\d+\.\d+\.\d+)/);
+    if (!match) return FALLBACK_UA;
+    const [, chrome, electron] = match;
+    let claudeVer = '';
+    try {
+      claudeVer = execFileSync(
+        '/usr/libexec/PlistBuddy',
+        ['-c', 'Print :CFBundleShortVersionString', `${app}/Contents/Info.plist`],
+        { encoding: 'utf8' },
+      ).trim();
+    } catch {}
+    const claudePart = claudeVer ? `Claude/${claudeVer} ` : '';
+    return `Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) ${claudePart}Chrome/${chrome} Electron/${electron} Safari/537.36`;
+  } catch {
+    return FALLBACK_UA;
+  }
+}
+
+const UA = deriveClaudeDesktopUA();
 
 function cookieHeader(c: ClaudeCookies): string {
   const parts = [`sessionKey=${c.sessionKey}`];
@@ -45,8 +76,8 @@ export class SessionExpiredError extends Error {
   }
 }
 
-async function call<T>(c: ClaudeCookies, path: string, schema: z.ZodType<T>): Promise<T> {
-  const r = await fetch(`${BASE}${path}`, {
+async function fetchOnce(c: ClaudeCookies, path: string): Promise<Response> {
+  return fetch(`${BASE}${path}`, {
     headers: {
       Cookie: cookieHeader(c),
       'User-Agent': UA,
@@ -55,6 +86,11 @@ async function call<T>(c: ClaudeCookies, path: string, schema: z.ZodType<T>): Pr
       Referer: `${BASE}/`,
     },
   });
+}
+
+async function call<T>(c: ClaudeCookies, path: string, schema: z.ZodType<T>): Promise<T> {
+  let r = await fetchOnce(c, path);
+  if (r.status === 403) r = await fetchOnce(c, path);
   if (r.status === 401) throw new SessionExpiredError();
   if (!r.ok) {
     const body = await r.text();

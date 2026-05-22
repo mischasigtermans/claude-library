@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.2.4] - 2026-05-22
+
+**Fixed**
+- Sync no longer fails with `403` from Cloudflare. Anthropic tightened the WAF in front of `claude.ai`: every first API request gets challenged, the immediate retry passes. The HTTP layer now retries once on 403.
+- User-Agent is now derived at module load from the installed Claude Desktop binary (`Chrome/X Electron/Y Claude/Z`) instead of a hardcoded Chrome 131 string. Falls back to a sane default if Claude.app isn't installed.
+
 ## [0.2.3] - 2026-05-20
 
 **Fixed**
