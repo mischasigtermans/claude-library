@@ -1,6 +1,6 @@
 {
   "name": "library",
-  "version": "0.2.4",
+  "version": "0.3.0",
   "description": "Claude Library: a local searchable mirror of your Claude Desktop conversations, projects, files, memory, and artifacts, exposed via MCP.",
   "license": "MIT",
   "author": {
@@ -12,7 +12,7 @@
     "node": ">=22.5.0"
   },
   "scripts": {
-    "build": "bun build src/server.ts --target=node --format=esm --outfile=dist/server.js",
+    "build": "bun build src/server.ts --target=node --format=esm --outfile=dist/server.js && bun build src/ingest.ts --target=node --format=esm --outfile=dist/ingest.js",
     "test": "vitest run"
   },
   "dependencies": {

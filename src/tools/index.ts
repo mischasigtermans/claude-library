@@ -12,10 +12,18 @@ import {
   SessionExpiredError,
   type Org,
 } from '../lib/api.js';
+import { basename } from 'node:path';
+import { discoverSessionFiles, parseSessionFile } from '../lib/code.js';
 import {
+  clearCodeSessions,
+  codeStats,
   findProjectByName,
   getArtifact,
   getCached,
+  getIngestWatermarks,
+  markIngestSkipped,
+  upsertCodeSession,
+  type SearchHit,
   getConversationFreshness,
   getDoc,
   getLatestMemory,
@@ -62,6 +70,18 @@ function fmtDate(iso: string): string {
 
 function trim(s: string, n: number): string {
   return s.length > n ? s.slice(0, n - 1) + '…' : s;
+}
+
+function sourceTag(platform: string | null | undefined): string {
+  return platform === 'CLAUDE_CODE' ? 'code' : 'chat';
+}
+
+function fmtMsgHit(h: SearchHit): string {
+  const where = h.platform === 'CLAUDE_CODE' && h.project_name ? `  ${trim(h.project_name, 34)}` : '';
+  return (
+    `[${sourceTag(h.platform)}/${h.sender}] ${trim(h.conversation_name, 50)}${h.conv_starred ? ' ★' : ''}${where}` +
+    `  (${h.conversation_uuid})\n  ${h.snippet}`
+  );
 }
 
 interface SyncStats {
@@ -199,9 +219,26 @@ async function performSync(opts: { full?: boolean; org?: string } = {}): Promise
     ? orgs.filter((o) => o.uuid === opts.org || o.name.toLowerCase().includes(filter))
     : orgs;
   const results: SyncStats[] = [];
+  let synced = 0;
   for (const org of targets) {
-    results.push(await syncOrg(cookies, org, { full: Boolean(opts.full) }));
+    try {
+      results.push(await syncOrg(cookies, org, { full: Boolean(opts.full) }));
+      synced++;
+    } catch (err) {
+      if (!(err instanceof SessionExpiredError)) throw err;
+      // listOrgs still lists orgs you have left or never had API access to. A 401 on one
+      // org means no access to that org, not a dead session, so skip it and keep going.
+      results.push({
+        org: org.name,
+        newConvos: 0, updatedConvos: 0, unchangedConvos: 0, failedConvos: 0,
+        newMessages: 0, projects: 0, docs: 0,
+        skipped: 'no API access with this session (401)',
+        failureSamples: [],
+      });
+    }
   }
+  // Every org refusing is the one case where the session itself is the problem.
+  if (targets.length > 0 && synced === 0) throw new SessionExpiredError();
   setMeta('last_sync_completed_at', new Date().toISOString());
   return results;
 }
@@ -259,7 +296,7 @@ async function autoSyncIfStale(): Promise<string | null> {
 const sync: Tool = {
   name: 'library_sync',
   description:
-    'Pull new and updated conversations from Claude Desktop. Incremental by default. Only fetches messages for conversations that changed since last sync. Captures regen branches and message tree (tree=True). Pass full=true to re-fetch everything.',
+    'Pull new and updated chats from Claude Desktop. Incremental by default. Only fetches messages for conversations that changed since last sync. Captures regen branches and message tree (tree=True). Orgs you have no API access to are reported as skipped. Pass full=true to re-fetch everything. For local Claude Code sessions use library_ingest.',
   inputSchema: {
     type: 'object',
     properties: {
@@ -279,10 +316,93 @@ const sync: Tool = {
   },
 };
 
+export interface IngestReport {
+  scanned: number;
+  ingested: number;
+  skipped: number;
+  empty: number;
+  failed: number;
+  messages: number;
+  redactions: number;
+  failureSamples: string[];
+}
+
+export async function ingestCodeSessions(opts: { full?: boolean; only?: string } = {}): Promise<IngestReport> {
+  const report: IngestReport = {
+    scanned: 0, ingested: 0, skipped: 0, empty: 0, failed: 0, messages: 0, redactions: 0, failureSamples: [],
+  };
+  const files = opts.only
+    ? (await discoverSessionFiles()).filter((f) => f.path === opts.only || f.path.endsWith(`/${opts.only}.jsonl`))
+    : await discoverSessionFiles();
+  if (opts.full && !opts.only) clearCodeSessions();
+  const marks = opts.full ? new Map() : getIngestWatermarks();
+
+  for (const file of files) {
+    report.scanned++;
+    const seen = marks.get(file.path);
+    if (seen && seen.mtime_ms === file.mtimeMs && seen.size === file.size) {
+      report.skipped++;
+      continue;
+    }
+    try {
+      const session = await parseSessionFile(file.path, file.projectDir);
+      if (!session) {
+        markIngestSkipped(file);
+        report.empty++;
+        continue;
+      }
+      upsertCodeSession(session, { path: file.path, mtimeMs: file.mtimeMs, size: file.size });
+      report.ingested++;
+      report.messages += session.messages.length;
+      report.redactions += session.redactions;
+    } catch (err) {
+      report.failed++;
+      if (report.failureSamples.length < 5) {
+        const msg = err instanceof Error ? err.message : String(err);
+        report.failureSamples.push(`${basename(file.path)}: ${msg.slice(0, 200)}`);
+      }
+    }
+  }
+  setMeta('last_code_ingest_at', new Date().toISOString());
+  return report;
+}
+
+function formatIngestReport(r: IngestReport): string {
+  const stats = codeStats();
+  const lines = [
+    `Ingested ${r.ingested} session${r.ingested === 1 ? '' : 's'} (${r.messages} messages, ${r.redactions} secrets redacted).`,
+    `  scanned ${r.scanned}, unchanged ${r.skipped}, no-content ${r.empty}${r.failed ? `, failed ${r.failed}` : ''}`,
+    `  library now holds ${stats.sessions} Claude Code sessions, ${stats.messages} messages` +
+      (stats.oldest ? `, ${fmtDate(stats.oldest)} to ${fmtDate(stats.newest ?? stats.oldest)}` : ''),
+  ];
+  for (const s of r.failureSamples) lines.push(`  ! ${s}`);
+  return lines.join('\n');
+}
+
+const ingestCode: Tool = {
+  name: 'library_ingest',
+  description:
+    'Import local Claude Code sessions from ~/.claude/projects into the library, so they are searchable alongside Claude Desktop chats. Incremental: unchanged session files are skipped via an mtime/size watermark. Stores your typed prompts, assistant replies, reasoning and tool names only. Tool results, file contents and images are never stored, and known secret formats are redacted before writing. Safe to run repeatedly and from a hook.',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      full: { type: 'boolean', description: 'Re-ingest every session file, ignoring watermarks. Default false.' },
+      only: { type: 'string', description: 'Ingest a single session: full path to a .jsonl file, or a bare session id.' },
+    },
+  },
+  handler: async (args) => {
+    const report = await ingestCodeSessions({
+      full: Boolean(args.full),
+      only: typeof args.only === 'string' ? args.only : undefined,
+    });
+    return formatIngestReport(report);
+  },
+};
+
 const list: Tool = {
   name: 'library_list',
   description:
-    'List recent Claude Desktop conversations from the local cache, newest first. Auto-syncs if cache is older than 24 hours. Filter by project name or UUID.',
+    'List recent conversations from the local cache, newest first, across both Claude Desktop chats and Claude Code sessions. Auto-syncs if cache is older than 24 hours. Filter by project name or UUID.',
   inputSchema: {
     type: 'object',
     properties: {
@@ -320,7 +440,7 @@ const list: Tool = {
 const search: Tool = {
   name: 'library_search',
   description:
-    'Search the local Claude Desktop library. The `kind` arg dispatches to one of several backends: messages, docs, memory, and artifacts use FTS5 (phrase quotes, AND/OR/NOT supported); citations use LIKE on title/url/site_name; tool_calls is exact-match on tool name; shares is substring match on snapshot_name. With `kind=all` (default), messages + docs + memory + artifacts are searched in parallel and merged. With `kind=memory` and no query, returns the snapshot history. Auto-syncs if cache is older than 24 hours.',
+    'Search the local library of Claude Desktop chats and Claude Code sessions. Message hits carry a source tag and can be narrowed with `source`. The `kind` arg dispatches to one of several backends: messages, docs, memory, and artifacts use FTS5 (phrase quotes, AND/OR/NOT supported); citations use LIKE on title/url/site_name; tool_calls is exact-match on tool name; shares is substring match on snapshot_name. With `kind=all` (default), messages + docs + memory + artifacts are searched in parallel and merged. With `kind=memory` and no query, returns the snapshot history. Auto-syncs if cache is older than 24 hours.',
   inputSchema: {
     type: 'object',
     properties: {
@@ -332,6 +452,11 @@ const search: Tool = {
         enum: ['all', 'messages', 'docs', 'memory', 'artifacts', 'tool_calls', 'citations', 'shares'],
         description: 'Filter results to one source. Default "all".',
       },
+      source: {
+        type: 'string',
+        enum: ['all', 'chat', 'code'],
+        description: 'Restrict message hits to Claude Desktop chats ("chat") or Claude Code sessions ("code"). Default "all".',
+      },
       noSync: { type: 'boolean', description: 'Skip the freshness auto-sync. Default false.' },
     },
     required: ['query'],
@@ -342,16 +467,12 @@ const search: Tool = {
     const note = args.noSync ? null : await autoSyncIfStale();
     const kind = typeof args.kind === 'string' ? args.kind : 'all';
     const limit = Number(args.limit ?? 20);
+    const source = args.source === 'chat' || args.source === 'code' ? args.source : undefined;
 
     if (kind === 'messages') {
-      const hits = searchCache(q, limit);
+      const hits = searchCache(q, limit, source);
       if (hits.length === 0) return [note, `No message matches for "${q}".`].filter(Boolean).join('\n');
-      const body = hits
-        .map(
-          (h) =>
-            `[${h.sender}] ${trim(h.conversation_name, 50)}${h.conv_starred ? ' ★' : ''}  (${h.conversation_uuid})\n  ${h.snippet}`,
-        )
-        .join('\n\n');
+      const body = hits.map(fmtMsgHit).join('\n\n');
       return [note, `Messages (${hits.length}):\n${body}`].filter(Boolean).join('\n\n');
     }
 
@@ -446,7 +567,7 @@ const search: Tool = {
     }
 
     // kind === 'all'
-    const msgHits = searchCache(q, limit);
+    const msgHits = searchCache(q, limit, source);
     const docHits = searchDocs(q, Number(args.docLimit ?? 10));
     const memHits = searchMemory(q, 3);
     const artHits = searchArtifacts({ query: q, limit: 10 });
@@ -455,15 +576,7 @@ const search: Tool = {
     }
     const sections: string[] = [];
     if (msgHits.length > 0) {
-      sections.push(
-        `Messages (${msgHits.length}):\n` +
-          msgHits
-            .map(
-              (h) =>
-                `[${h.sender}] ${trim(h.conversation_name, 50)}${h.conv_starred ? ' ★' : ''}  (${h.conversation_uuid})\n  ${h.snippet}`,
-            )
-            .join('\n\n'),
-      );
+      sections.push(`Messages (${msgHits.length}):\n` + msgHits.map(fmtMsgHit).join('\n\n'));
     }
     if (docHits.length > 0) {
       sections.push(
@@ -605,7 +718,7 @@ const open: Tool = {
 const projects: Tool = {
   name: 'library_projects',
   description:
-    'List Claude Desktop projects with conversation counts. Pass name= to filter to one project. Add detail=true to return the full record including system prompt.',
+    'List projects with conversation counts: Claude Desktop projects and one entry per Claude Code working directory. Pass name= to filter to one project. Add detail=true to return the full record including system prompt.',
   inputSchema: {
     type: 'object',
     properties: {
@@ -669,7 +782,7 @@ const projects: Tool = {
 const status: Tool = {
   name: 'library_status',
   description:
-    'Report cache state: total conversations, last sync time, and a quick auth check against Claude Desktop cookies.',
+    'Report cache state: conversation, project and doc counts, last sync and ingest times, and a check that Claude Desktop cookies can be read. The cookie check does not prove the session is still valid server-side.',
   inputSchema: { type: 'object', properties: {} },
   handler: async () => {
     let auth = 'ok';
@@ -704,4 +817,4 @@ const status: Tool = {
   },
 };
 
-export const tools: Tool[] = [sync, list, search, outline, open, projects, status];
+export const tools: Tool[] = [sync, ingestCode, list, search, outline, open, projects, status];

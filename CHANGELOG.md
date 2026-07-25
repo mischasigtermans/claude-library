@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.3.0] - 2026-07-25
+
+Library stops being a Claude Desktop mirror and becomes an index of everything you have worked through with Claude. Local Claude Code sessions are a second source alongside chats, so one search covers the thinking you did in a chat and the work you did in the terminal. Because Claude Code prunes session transcripts after 30 days, ingesting them is also how you keep them.
+
+**Added**
+- Claude Code sessions are indexed alongside Claude Desktop chats. `library_ingest` reads `~/.claude/projects` and keeps your typed prompts, assistant prose and the tool calls that changed something, roughly 1% of the bytes. Tool results, file contents and images are never stored. Sessions land on `platform = 'CLAUDE_CODE'` and group under a project per working directory.
+- Redaction pass over everything written to the cache: API keys, JWTs, PEM private key blocks, auth headers, connection-string passwords and secret-shaped assignments. Placeholders and interpolations are left alone, and each run reports how many secrets it caught.
+- `source=` on `library_search` narrows message hits to `chat` or `code`. Hits are tagged with their source and, for code, the working directory.
+- `SessionStart` and `SessionEnd` hooks keep the index current. Both detach immediately; ingest is an mtime and size watermark sweep against the new `ingest_state` table, so a missed run is picked up by the next one and a routine pass over ~600 sessions takes about two seconds.
+- `cwd`, `git_branch` and `source_path` on `conversations`.
+
+**Fixed**
+- An org you have left no longer breaks the whole sync. `/api/organizations` keeps listing orgs whose endpoints return 401, and that 401 was read as an expired session, aborting every remaining org and reporting "Claude Desktop session expired" against a perfectly valid cookie. A 401 on a single org is now recorded as `skipped (no API access with this session)` and the run continues. A 401 from `listOrgs`, or every org refusing, still reports an expired session.
+- `last_sync_completed_at` is written again. One inaccessible org used to abort `performSync` before it could be set, so the cache looked permanently stale and `library_search` re-synced on every call.
+- Bulk message deletes no longer scan the FTS tables once per row. The `messages_ad` and `message_blocks_ad` triggers match on an UNINDEXED column, which made a full refresh quadratic; suppressing them around bulk deletes took it from over ten minutes to under three.
+
 ## [0.2.4] - 2026-05-22
 
 **Fixed**

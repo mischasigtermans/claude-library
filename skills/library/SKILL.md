@@ -1,11 +1,14 @@
 ---
 name: library
-description: Read the user's Claude Desktop conversations from this Claude Code session. Activates when the user references past chats with Claude (Desktop or web), asks "what did I tell Claude about X", "find that conversation where I", "pull the chat about Y", or invokes /library. Routes through the library MCP server.
+description: Read the user's past work with Claude from this Claude Code session, both Claude Desktop chats and earlier Claude Code sessions. Activates when the user references past chats or past terminal work, asks "what did I tell Claude about X", "find that conversation where I", "when did I last touch Y", "what did we decide about Z", or invokes /library. Routes through the library MCP server.
 ---
 
 # Library
 
-A read-only window into the user's Claude Desktop conversation history. Each chat lives on Anthropic's servers. The `library` MCP server pulls them through Claude's session cookies and caches them locally for fast outline and full-text search.
+A read-only window into everything the user has worked through with Claude. Two sources, one index:
+
+- **Chats** from claude.ai, Desktop and mobile, pulled through Claude's session cookies.
+- **Claude Code sessions** read from `~/.claude/projects`, grouped by working directory.
 
 State lives in `~/.claude/library/library.db`. Use the `library_*` tools for every operation. **Never** read or write the cache file directly.
 
@@ -23,19 +26,28 @@ Two paths.
 
 2. **Explicit path.** The user typed `/library` or `/library <action>`. Jump to *Actions*.
 
-Don't fire for things obviously about the *current* Claude Code session. Don't fire for Claude Code session history (that's a different MCP).
+Don't fire for things obviously about the *current* session, which you can already see.
 
 ## Find sequence
 
 Default loop when the user wants to recall something from past chats.
 
 1. **Search first.** Call `library_search` with a tight query. 2-4 keywords, FTS5 syntax. Don't dump the whole user query in.
-2. **Read the snippets.** Pick the most relevant 1-3 hits. Hits come in sections: `[human]/[assistant]` from messages, `[doc]` from project knowledge-base files, `[memory #N]` from memory snapshots, `[artifact]` from code blocks.
+2. **Read the snippets.** Pick the most relevant 1-3 hits. Hits come in sections: `[chat/human]`, `[chat/assistant]`, `[code/human]` and `[code/assistant]` from messages, `[doc]` from project knowledge-base files, `[memory #N]` from memory snapshots, `[artifact]` from code blocks. Code hits also show their working directory.
 3. **Drill in.** For any hit with a UUID, call `library_open <uuid>` to read the full item. For conversations, call `library_outline` first, then `library_open` with `from`/`to` bounds.
 4. **Pull only what's needed.** Don't fetch the full transcript when 5 messages will do.
 5. **Answer the user.** Quote the relevant passage. Cite the conversation title or doc filename, plus date.
 
 If `library_search` returns nothing, call `library_list` to see what's cached. The user may need to sync.
+
+### Choosing a source
+
+`source=` narrows message hits. Default is both, which is usually right.
+
+- `source=chat` when the user is recalling thinking: decisions, strategy, drafting, anything they talked through rather than built.
+- `source=code` when the user is recalling work: when a file changed, which command they ran, what broke in a repo.
+
+Code sessions hold what the user typed and what Claude replied. They never hold file contents or command output, so don't expect to recover a diff or a stack trace from them. Read the repo for that.
 
 ### Language-aware querying
 
@@ -69,13 +81,19 @@ Call `library_sync`. Set `full: true` if `--full` is present. Pass `org` if give
 
 Sync is incremental by default. It pulls conversation metadata for every page and only fetches message bodies for new or updated conversations. `--full` re-fetches everything.
 
+### `ingest [--full]`
+
+Call `library_ingest`. Set `full: true` if `--full` is present. Print the result.
+
+Pulls Claude Code sessions from `~/.claude/projects`. This runs on its own at the start and end of every session, so reach for it only when the user wants the index current right now, or when `--full` is needed to rebuild after a parser change.
+
 ### `list [N] [--project NAME]`
 
 Call `library_list` with `limit` and optional `project`. Default limit 25. Print the table.
 
-### `search <query> [--kind KIND]`
+### `search <query> [--kind KIND] [--source SOURCE]`
 
-Call `library_search` with the query. Optionally pass `kind` to restrict to one source:
+Call `library_search` with the query. Optionally pass `source` (`all`, `chat`, `code`) to restrict message hits to one origin, and `kind` to restrict to one backend:
 
 - `all` (default): messages, docs, memory, artifacts
 - `messages`: conversation message bodies only

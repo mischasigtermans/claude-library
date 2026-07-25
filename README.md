@@ -3,9 +3,11 @@
 [![Version](https://img.shields.io/badge/dynamic/json?url=https://raw.githubusercontent.com/mischasigtermans/claude-library/main/.claude-plugin/plugin.json&query=$.version&label=version&prefix=v)](https://github.com/mischasigtermans/claude-library)
 [![License](https://img.shields.io/github/license/mischasigtermans/claude-library)](LICENSE)
 
-Local searchable mirror of your Claude chats, readable from any Claude Code session.
+Local searchable mirror of everything you have worked through with Claude, readable from any Claude Code session.
 
-Claude Chats are your conversations with Claude on claude.ai, in the Desktop app, or on mobile. Not Claude Code. Not Cowork. The chat product. Those conversations live on Anthropic's servers, so Code sessions can't see them. Claude Library uses your Claude Desktop session cookie to pull your chats, projects, memory, and shared snapshots, and caches them locally in SQLite. Any Claude Code or Cowork session can then search and read what you worked through.
+Two sources feed one index. **Chats** are your conversations on claude.ai, in the Desktop app, or on mobile; they live on Anthropic's servers, so Library pulls them with your Claude Desktop session cookie. **Code sessions** are the transcripts Claude Code writes to `~/.claude/projects`; Library reads them off disk. Both land in the same SQLite database, so one search covers the thinking you did in chat and the work you did in the terminal.
+
+Code sessions are pruned after 30 days by default. Ingesting them is also how you keep them.
 
 ## Installation
 
@@ -17,7 +19,7 @@ Claude Chats are your conversations with Claude on claude.ai, in the Desktop app
 ### Requires
 
 - macOS (uses the `security` CLI and Chromium-format cookie store)
-- Claude Desktop, signed in
+- Claude Desktop, signed in, for chats. Code sessions need neither.
 - Node 22.5+ (for the built-in `node:sqlite` module)
 
 ## Quick start
@@ -29,9 +31,12 @@ Claude Chats are your conversations with Claude on claude.ai, in the Desktop app
 
 First sync pulls every conversation, project, doc, memory snapshot, and share into `~/.claude/library/library.db`. After that, sync is incremental. Search hits return ranked snippets across messages, project knowledge-base docs, your memory text, and extracted code artifacts. Drill into any result with `/library open <uuid>`.
 
+Claude Code sessions ingest automatically at the start and end of every session; `/library ingest` pulls them in on demand. Hits are tagged `[code/…]` or `[chat/…]`, and `source=code` or `source=chat` narrows a search to one of them.
+
 ## Features
 
 - Full-text search (FTS5) across conversation messages, project knowledge-base docs, memory snapshots, and assistant-generated code artifacts.
+- Local Claude Code sessions indexed alongside chats, grouped by working directory, filterable with `source=`.
 - Filtered search per source via `kind=`: messages, docs, memory, artifacts, tool_calls, citations, shares.
 - Branch-aware sync: captures regen branches via the conversation tree, not just the active leaf.
 - Project view with `prompt_template` (system prompt) per project plus knowledge-base docs and files.
@@ -46,11 +51,25 @@ Reads the AES key from the macOS Keychain (`Claude Safe Storage`), decrypts the 
 
 Sync is incremental. Paginates the conversation list every run, fetches message bodies only for conversations whose `updated_at` advanced. Pass `full=true` to force a complete refetch. `library_search` and `library_list` auto-sync if the cache is older than 24 hours.
 
+### Claude Code ingest
+
+Session transcripts in `~/.claude/projects` are JSONL, and roughly 99% of their bytes are tool results: file contents, command output, diffs. Library keeps the other 1%.
+
+Stored: your typed prompts (identified by `origin.kind`, not guessed from shape), assistant prose, and the name and arguments of tools that changed something (`Bash`, `Edit`, `Write`, `MultiEdit`, `NotebookEdit`). Tool calls fold into the assistant message that preceded them.
+
+Never stored: tool results, file contents, images, read-only tool calls, and the `subagents/`, `tool-results/` and `memory/` subdirectories.
+
+Everything that is stored passes through a redaction pass first. It removes API keys (Anthropic, OpenAI, Stripe, GitHub, Slack, AWS, Google), JWTs, PEM private key blocks, bearer and basic auth headers, passwords inside connection strings, and secret-shaped or high-entropy assignments, while leaving placeholders like `${VAR}` and `changeme` intact. Ingest reports how many it caught.
+
+Ingest is incremental against an `ingest_state` watermark of mtime and size per file, so unchanged sessions are skipped. A full pass over ~600 sessions takes about three minutes; a routine pass takes about two seconds. The `SessionEnd` hook is the fast path and `SessionStart` is the net that catches crashes, `kill -9`, closed terminals and restarts, where `SessionEnd` never fires. Both are detached and never block a session. Pass `full=true` to rebuild from scratch.
+
 ## Caveats
 
-- SSO-only orgs return 403 with personal session cookies. Library skips them gracefully.
-- When the session cookie expires, library surfaces a clear "session expired" error. Open Claude Desktop and sign in to refresh, then retry.
-- Treat the cache as sensitive. It contains your full Claude Desktop history including memory and project system prompts.
+- `/api/organizations` lists orgs you have no API access to, including ones you have left. Their endpoints return 401. Library records them as skipped and syncs the rest.
+- A session expired error means the cookie is genuinely dead: it is raised when the org listing itself is refused, or when every org is. Open Claude Desktop and sign in to refresh, then retry.
+- Treat the cache as sensitive. It contains your full Claude Desktop history including memory and project system prompts, plus every prompt you have typed into Claude Code.
+- Redaction catches known secret formats, not meaning. A client name, a deal figure or an unreleased plan is stored as written.
+- Resuming a session copies earlier turns into the new transcript, so text shared by a session and its resume appears once per session.
 
 ## Changelog
 

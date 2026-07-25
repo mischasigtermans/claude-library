@@ -14,6 +14,7 @@ function tx<T>(db: DatabaseSync, fn: () => T): T {
     throw e;
   }
 }
+import { projectNameFor, type CodeSession } from './code.js';
 import type {
   Block,
   Citation,
@@ -59,6 +60,9 @@ function open(): DatabaseSync {
   mkdirSync(CACHE_DIR, { recursive: true });
   const db = new DatabaseSync(DB_PATH);
   db.exec('PRAGMA journal_mode = WAL');
+  // The MCP server and the hook-driven ingest CLI are separate processes on one file.
+  // SQLite defaults to failing a busy write immediately; wait for the other writer instead.
+  db.exec('PRAGMA busy_timeout = 15000');
   db.exec(`
     CREATE TABLE IF NOT EXISTS conversations (
       uuid TEXT PRIMARY KEY,
@@ -115,6 +119,16 @@ function open(): DatabaseSync {
     CREATE TABLE IF NOT EXISTS meta (
       key TEXT PRIMARY KEY,
       value TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS ingest_state (
+      source_path TEXT PRIMARY KEY,
+      mtime_ms INTEGER NOT NULL,
+      size INTEGER NOT NULL,
+      conversation_uuid TEXT,
+      message_count INTEGER NOT NULL DEFAULT 0,
+      redactions INTEGER NOT NULL DEFAULT 0,
+      ingested_at TEXT NOT NULL
     );
 
     CREATE TABLE IF NOT EXISTS project_docs (
@@ -285,6 +299,9 @@ function open(): DatabaseSync {
     ['platform', 'TEXT'],
     ['session_id', 'TEXT'],
     ['settings_json', 'TEXT'],
+    ['cwd', 'TEXT'],
+    ['git_branch', 'TEXT'],
+    ['source_path', 'TEXT'],
   ]);
   ensureColumns(db, 'messages', [
     ['parent_uuid', 'TEXT'],
@@ -567,6 +584,151 @@ function upsertArtifacts(messageUuid: string, conversationUuid: string, createdA
       createdAt,
     );
   });
+}
+
+const LOCAL_ORG = 'local';
+
+// The FTS delete triggers match on an UNINDEXED column, so every row delete scans the whole
+// FTS table. Suppressing them around a bulk delete turns O(rows x table) into one scan.
+// open() recreates both unconditionally, so an interrupted run self-heals on next start.
+const DELETE_TRIGGERS = `
+  CREATE TRIGGER IF NOT EXISTS messages_ad AFTER DELETE ON messages BEGIN
+    DELETE FROM messages_fts WHERE message_uuid = old.uuid;
+  END;
+  CREATE TRIGGER IF NOT EXISTS message_blocks_ad AFTER DELETE ON message_blocks BEGIN
+    DELETE FROM blocks_fts WHERE block_uuid = old.uuid;
+  END;`;
+
+function withoutDeleteTriggers<T>(fn: () => T): T {
+  db().exec('DROP TRIGGER IF EXISTS messages_ad; DROP TRIGGER IF EXISTS message_blocks_ad;');
+  try {
+    return fn();
+  } finally {
+    db().exec(DELETE_TRIGGERS);
+  }
+}
+
+function deleteMessagesWhere(clause: string, args: unknown[]): void {
+  const selectUuids = `SELECT uuid FROM messages WHERE ${clause}`;
+  db().prepare(`DELETE FROM blocks_fts WHERE message_uuid IN (${selectUuids})`).run(...args);
+  db().prepare(`DELETE FROM message_blocks WHERE message_uuid IN (${selectUuids})`).run(...args);
+  db().prepare(`DELETE FROM messages_fts WHERE message_uuid IN (${selectUuids})`).run(...args);
+  db().prepare(`DELETE FROM messages WHERE ${clause}`).run(...args);
+}
+
+export function clearCodeSessions(): void {
+  const codeConvos = "conversation_uuid IN (SELECT uuid FROM conversations WHERE platform = 'CLAUDE_CODE')";
+  tx(db(), () => {
+    withoutDeleteTriggers(() => deleteMessagesWhere(codeConvos, []));
+    db().prepare('DELETE FROM ingest_state').run();
+  });
+}
+
+export interface IngestWatermark {
+  source_path: string;
+  mtime_ms: number;
+  size: number;
+}
+
+export function getIngestWatermarks(): Map<string, IngestWatermark> {
+  const rows = db()
+    .prepare('SELECT source_path, mtime_ms, size FROM ingest_state')
+    .all() as IngestWatermark[];
+  return new Map(rows.map((r) => [r.source_path, r]));
+}
+
+export function upsertCodeSession(session: CodeSession, file: { path: string; mtimeMs: number; size: number }): void {
+  const now = new Date().toISOString();
+  const projectUuid = `code:${session.projectDir}`;
+
+  tx(db(), () => {
+    db()
+      .prepare(
+        `INSERT INTO projects (uuid, org_id, name, description, is_starred, created_at, updated_at, synced_at)
+         VALUES (?, ?, ?, NULL, 0, ?, ?, ?)
+         ON CONFLICT(uuid) DO UPDATE SET name=excluded.name, updated_at=excluded.updated_at, synced_at=excluded.synced_at`,
+      )
+      .run(projectUuid, LOCAL_ORG, projectNameFor(session.projectDir, session.cwd), session.createdAt, session.updatedAt, now);
+
+    db()
+      .prepare(
+        `INSERT INTO conversations (uuid, org_id, name, summary, model, is_starred, project_uuid, created_at, updated_at,
+           synced_at, messages_synced, messages_synced_for, platform, session_id, cwd, git_branch, source_path)
+         VALUES (?, ?, ?, NULL, ?, 0, ?, ?, ?, ?, 1, ?, 'CLAUDE_CODE', ?, ?, ?, ?)
+         ON CONFLICT(uuid) DO UPDATE SET
+           name=excluded.name, model=excluded.model, project_uuid=excluded.project_uuid,
+           updated_at=excluded.updated_at, synced_at=excluded.synced_at,
+           messages_synced_for=excluded.messages_synced_for,
+           cwd=excluded.cwd, git_branch=excluded.git_branch, source_path=excluded.source_path`,
+      )
+      .run(
+        session.uuid, LOCAL_ORG, session.name, session.version, projectUuid,
+        session.createdAt, session.updatedAt, now, session.updatedAt,
+        session.sessionId, session.cwd, session.gitBranch, file.path,
+      );
+
+    const insMsg = db().prepare(
+      `INSERT INTO messages (uuid, conversation_uuid, idx, sender, text, created_at, parent_uuid, input_mode, truncated)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)`,
+    );
+    const insBlock = db().prepare(
+      `INSERT INTO message_blocks (uuid, message_uuid, position, type, text, tool_use_id, tool_name, tool_input_json, is_error)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)`,
+    );
+
+    withoutDeleteTriggers(() => deleteMessagesWhere('conversation_uuid = ?', [session.uuid]));
+    for (const m of session.messages) {
+      insMsg.run(m.uuid, session.uuid, m.idx, m.sender, m.text, m.createdAt, m.parentUuid, m.inputMode);
+      for (const b of m.blocks) {
+        insBlock.run(`${m.uuid}-${b.position}`, m.uuid, b.position, b.type, b.text, b.toolUseId, b.toolName, b.toolInputJson);
+      }
+    }
+
+    db()
+      .prepare(
+        `INSERT INTO ingest_state (source_path, mtime_ms, size, conversation_uuid, message_count, redactions, ingested_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(source_path) DO UPDATE SET
+           mtime_ms=excluded.mtime_ms, size=excluded.size, conversation_uuid=excluded.conversation_uuid,
+           message_count=excluded.message_count, redactions=excluded.redactions, ingested_at=excluded.ingested_at`,
+      )
+      .run(file.path, file.mtimeMs, file.size, session.uuid, session.messages.length, session.redactions, now);
+  });
+}
+
+export function markIngestSkipped(file: { path: string; mtimeMs: number; size: number }): void {
+  db()
+    .prepare(
+      `INSERT INTO ingest_state (source_path, mtime_ms, size, conversation_uuid, message_count, redactions, ingested_at)
+       VALUES (?, ?, ?, NULL, 0, 0, ?)
+       ON CONFLICT(source_path) DO UPDATE SET mtime_ms=excluded.mtime_ms, size=excluded.size, ingested_at=excluded.ingested_at`,
+    )
+    .run(file.path, file.mtimeMs, file.size, new Date().toISOString());
+}
+
+export interface CodeStats {
+  sessions: number;
+  messages: number;
+  redactions: number;
+  oldest: string | null;
+  newest: string | null;
+}
+
+export function codeStats(): CodeStats {
+  const c = db()
+    .prepare(
+      `SELECT COUNT(*) AS sessions, MIN(created_at) AS oldest, MAX(updated_at) AS newest
+       FROM conversations WHERE platform = 'CLAUDE_CODE'`,
+    )
+    .get() as { sessions: number; oldest: string | null; newest: string | null };
+  const m = db()
+    .prepare(
+      `SELECT COUNT(*) AS n FROM messages
+       WHERE conversation_uuid IN (SELECT uuid FROM conversations WHERE platform = 'CLAUDE_CODE')`,
+    )
+    .get() as { n: number };
+  const r = db().prepare('SELECT COALESCE(SUM(redactions), 0) AS n FROM ingest_state').get() as { n: number };
+  return { sessions: c.sessions, messages: m.n, redactions: r.n, oldest: c.oldest, newest: c.newest };
 }
 
 export function upsertMessageFiles(messageUuid: string, files: MessageFile[]): void {
@@ -921,11 +1083,18 @@ export interface SearchHit {
   conv_starred: number;
   message_uuid: string;
   sender: string;
+  platform: string | null;
+  project_name: string | null;
   snippet: string;
   rank: number;
 }
 
-export function search(query: string, limit = 20): SearchHit[] {
+export function search(query: string, limit = 20, source?: 'chat' | 'code'): SearchHit[] {
+  const where = ['messages_fts MATCH ?'];
+  const args: unknown[] = [query];
+  if (source === 'code') where.push("c.platform = 'CLAUDE_CODE'");
+  if (source === 'chat') where.push("(c.platform IS NULL OR c.platform <> 'CLAUDE_CODE')");
+  args.push(limit);
   return db()
     .prepare(
       `SELECT
@@ -934,6 +1103,8 @@ export function search(query: string, limit = 20): SearchHit[] {
          c.is_starred AS conv_starred,
          f.message_uuid AS message_uuid,
          f.sender AS sender,
+         c.platform AS platform,
+         p.name AS project_name,
          snippet(messages_fts, 0, '«', '»', '…', 16) AS snippet,
          (bm25(messages_fts)
            - CASE WHEN c.is_starred=1 THEN 5.0 ELSE 0 END
@@ -941,10 +1112,10 @@ export function search(query: string, limit = 20): SearchHit[] {
        FROM messages_fts f
        JOIN conversations c ON c.uuid = f.conversation_uuid
        LEFT JOIN projects p ON p.uuid = c.project_uuid
-       WHERE messages_fts MATCH ?
+       WHERE ${where.join(' AND ')}
        ORDER BY rank LIMIT ?`,
     )
-    .all(query, limit) as SearchHit[];
+    .all(...args) as SearchHit[];
 }
 
 export function lastSyncedAt(orgId?: string): string | null {

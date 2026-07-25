@@ -23579,10 +23579,295 @@ function getOrgMemory(c, orgId) {
   return call(c, `/api/organizations/${orgId}/memory`, OrganizationMemorySchema);
 }
 
+// src/tools/index.ts
+import { basename as basename2 } from "node:path";
+
+// src/lib/code.ts
+import { createReadStream } from "node:fs";
+import { readdir, stat } from "node:fs/promises";
+import { createInterface } from "node:readline";
+import { homedir as homedir2 } from "node:os";
+import { basename, join as join2 } from "node:path";
+
+// src/lib/redact.ts
+var PATTERNS = [
+  [/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g, "[REDACTED:private-key]"],
+  [/sk-ant-[A-Za-z0-9_-]{20,}/g, "[REDACTED:anthropic-key]"],
+  [/\b(?:sk|rk|pk)_(?:live|test)_[A-Za-z0-9]{16,}/g, "[REDACTED:stripe-key]"],
+  [/\bsk-(?:proj-)?[A-Za-z0-9_-]{20,}/g, "[REDACTED:openai-key]"],
+  [/\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{36,}/g, "[REDACTED:github-token]"],
+  [/\bgithub_pat_[A-Za-z0-9_]{20,}/g, "[REDACTED:github-token]"],
+  [/\bxox[baprs]-[A-Za-z0-9-]{10,}/g, "[REDACTED:slack-token]"],
+  [/\bAKIA[0-9A-Z]{16}\b/g, "[REDACTED:aws-key-id]"],
+  [/\bAIza[A-Za-z0-9_-]{35}\b/g, "[REDACTED:google-key]"],
+  [/\bey[A-Za-z0-9_-]{10,}\.ey[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/g, "[REDACTED:jwt]"],
+  [/\b[a-z][a-z0-9+.-]*:\/\/[^\s:@/]+:[^\s@/]{3,}@/gi, "[REDACTED:credentialed-url]@"],
+  [/\bBearer\s+[A-Za-z0-9._~+/-]{20,}=*/g, "Bearer [REDACTED:token]"],
+  [/\b(?:Basic)\s+[A-Za-z0-9+/]{20,}={0,2}/g, "Basic [REDACTED:token]"]
+];
+var SECRET_ASSIGNMENT = /\b([A-Za-z0-9_]*(?:SECRET|PASSWORD|PASSWD|TOKEN|APIKEY|API_KEY|PRIVATE_KEY|ACCESS_KEY|CLIENT_SECRET|DSN|CREDENTIALS?)[A-Za-z0-9_]*)(\s*[:=]\s*)(["']?)([^\s"',;]{8,})\3/gi;
+var HIGH_ENTROPY_ENV = /^([A-Z][A-Z0-9_]{2,})=(["']?)([A-Za-z0-9+/_-]{24,}={0,2})\2$/gm;
+function redact(input) {
+  if (!input)
+    return { text: input, count: 0 };
+  let count = 0;
+  let text = input;
+  for (const [re, replacement] of PATTERNS) {
+    text = text.replace(re, () => {
+      count++;
+      return replacement;
+    });
+  }
+  text = text.replace(SECRET_ASSIGNMENT, (_m, name, sep, quote, value) => {
+    if (isPlaceholder(value))
+      return `${name}${sep}${quote}${value}${quote}`;
+    count++;
+    return `${name}${sep}${quote}[REDACTED]${quote}`;
+  });
+  text = text.replace(HIGH_ENTROPY_ENV, (_m, name, quote, value) => {
+    if (isPlaceholder(value))
+      return `${name}=${quote}${value}${quote}`;
+    count++;
+    return `${name}=${quote}[REDACTED]${quote}`;
+  });
+  return { text, count };
+}
+function isPlaceholder(value) {
+  const v = value.toLowerCase();
+  if (v.startsWith("[redacted"))
+    return true;
+  if (v.startsWith("${") || v.startsWith("$(") || v.startsWith("%("))
+    return true;
+  if (/^(null|nil|true|false|none|undefined|changeme|password|secret|xxx+|\.{3,}|<[^>]+>)$/.test(v))
+    return true;
+  if (/^[x*.\-_]+$/.test(v))
+    return true;
+  return false;
+}
+
+// src/lib/code.ts
+var SESSIONS_DIR = join2(homedir2(), ".claude", "projects");
+var MAX_TOOL_INPUT = 400;
+var HUMAN_ORIGINS = new Set(["human", "channel"]);
+var MUTATING_TOOLS = new Set(["Bash", "Edit", "MultiEdit", "Write", "NotebookEdit"]);
+function blockText(blocks) {
+  return blocks.filter((b) => b.type === "text" && b.text).map((b) => b.text).join(`
+
+`);
+}
+function parseContent(content, counter) {
+  const out = [];
+  if (typeof content === "string") {
+    const { text, count } = redact(content);
+    counter.n += count;
+    if (text.trim())
+      out.push({ position: 0, type: "text", text, toolUseId: null, toolName: null, toolInputJson: null });
+    return out;
+  }
+  if (!Array.isArray(content))
+    return out;
+  for (const raw of content) {
+    const b = raw;
+    const pos = out.length;
+    switch (b.type) {
+      case "text": {
+        const { text, count } = redact(String(b.text ?? ""));
+        counter.n += count;
+        if (text.trim())
+          out.push({ position: pos, type: "text", text, toolUseId: null, toolName: null, toolInputJson: null });
+        break;
+      }
+      case "thinking": {
+        const { text, count } = redact(String(b.thinking ?? b.text ?? ""));
+        counter.n += count;
+        if (text.trim())
+          out.push({ position: pos, type: "thinking", text, toolUseId: null, toolName: null, toolInputJson: null });
+        break;
+      }
+      case "tool_use":
+      case "server_tool_use": {
+        if (typeof b.name !== "string" || !MUTATING_TOOLS.has(b.name))
+          break;
+        const { text: input, count } = redact(b.input === undefined ? "" : JSON.stringify(b.input).slice(0, MAX_TOOL_INPUT));
+        counter.n += count;
+        out.push({
+          position: pos,
+          type: "tool_use",
+          text: null,
+          toolUseId: typeof b.id === "string" ? b.id : null,
+          toolName: typeof b.name === "string" ? b.name : null,
+          toolInputJson: input || null
+        });
+        break;
+      }
+      default:
+        break;
+    }
+  }
+  return out;
+}
+async function parseSessionFile(path, projectDir) {
+  const rl = createInterface({ input: createReadStream(path, { encoding: "utf8" }), crlfDelay: Infinity });
+  const counter = { n: 0 };
+  const messages = [];
+  const seenUuids = new Map;
+  let sessionId = "";
+  let aiTitle = "";
+  let cwd = null;
+  let gitBranch = null;
+  let version2 = null;
+  let first = "";
+  let last = "";
+  for await (const line of rl) {
+    if (!line.trim())
+      continue;
+    let r;
+    try {
+      r = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (r.sessionId && !sessionId)
+      sessionId = r.sessionId;
+    if (r.cwd && !cwd)
+      cwd = r.cwd;
+    if (r.gitBranch)
+      gitBranch = r.gitBranch;
+    if (r.version)
+      version2 = r.version;
+    if (r.type === "ai-title" && r.aiTitle)
+      aiTitle = r.aiTitle;
+    if (r.type !== "user" && r.type !== "assistant")
+      continue;
+    if (!r.uuid || !r.timestamp)
+      continue;
+    if (r.type === "user" && !HUMAN_ORIGINS.has(r.origin?.kind ?? ""))
+      continue;
+    const blocks = parseContent(r.message?.content, counter);
+    if (blocks.length === 0)
+      continue;
+    if (!first)
+      first = r.timestamp;
+    last = r.timestamp;
+    const message = {
+      uuid: r.uuid,
+      idx: messages.length,
+      sender: r.type === "user" ? "human" : "assistant",
+      text: blockText(blocks),
+      createdAt: r.timestamp,
+      parentUuid: r.parentUuid ?? null,
+      inputMode: r.type === "user" ? r.promptSource ?? r.origin?.kind ?? null : null,
+      blocks
+    };
+    const prior = seenUuids.get(r.uuid);
+    if (prior === undefined) {
+      seenUuids.set(r.uuid, messages.length);
+      messages.push(message);
+    } else {
+      message.idx = prior;
+      messages[prior] = message;
+    }
+  }
+  if (!sessionId || messages.length === 0)
+    return null;
+  const merged = mergeToolOnlyTurns(messages);
+  for (const m of merged) {
+    m.uuid = `code:${sessionId}:${m.uuid}`;
+    m.parentUuid = m.parentUuid ? `code:${sessionId}:${m.parentUuid}` : null;
+  }
+  const firstHuman = merged.find((m) => m.sender === "human")?.text ?? "";
+  const name = aiTitle || firstHuman.split(`
+`)[0].slice(0, 80) || "(untitled session)";
+  return {
+    uuid: `code:${sessionId}`,
+    sessionId,
+    projectDir,
+    name,
+    cwd,
+    gitBranch,
+    version: version2,
+    createdAt: first,
+    updatedAt: last,
+    messages: merged,
+    redactions: counter.n
+  };
+}
+function mergeToolOnlyTurns(messages) {
+  const out = [];
+  let pending = null;
+  const renumber = (m) => {
+    m.blocks = m.blocks.map((b, i) => ({ ...b, position: i }));
+    return m;
+  };
+  const push = (m) => {
+    m.idx = out.length;
+    out.push(renumber(m));
+  };
+  for (const m of messages) {
+    const toolOnly = m.sender === "assistant" && !m.text.trim() && m.blocks.every((b) => b.type === "tool_use");
+    if (toolOnly) {
+      const prev = out[out.length - 1];
+      if (prev?.sender === "assistant") {
+        prev.blocks.push(...m.blocks);
+        renumber(prev);
+      } else if (pending) {
+        pending.blocks.push(...m.blocks);
+      } else {
+        pending = m;
+      }
+      continue;
+    }
+    if (pending) {
+      if (m.sender === "assistant") {
+        m.blocks = [...pending.blocks, ...m.blocks];
+      } else {
+        push(pending);
+      }
+      pending = null;
+    }
+    push(m);
+  }
+  if (pending)
+    push(pending);
+  return out;
+}
+async function discoverSessionFiles(root = SESSIONS_DIR) {
+  const out = [];
+  let dirs;
+  try {
+    dirs = (await readdir(root, { withFileTypes: true })).filter((d) => d.isDirectory()).map((d) => d.name);
+  } catch {
+    return out;
+  }
+  for (const dir of dirs) {
+    let entries;
+    try {
+      entries = (await readdir(join2(root, dir))).filter((f) => f.endsWith(".jsonl"));
+    } catch {
+      continue;
+    }
+    for (const file2 of entries) {
+      const path = join2(root, dir, file2);
+      try {
+        const s = await stat(path);
+        out.push({ path, projectDir: dir, mtimeMs: Math.floor(s.mtimeMs), size: s.size });
+      } catch {
+        continue;
+      }
+    }
+  }
+  return out;
+}
+function projectNameFor(projectDir, cwd) {
+  if (cwd)
+    return cwd.replace(homedir2(), "~");
+  return basename(projectDir.replace(/^-/, "/").replace(/-/g, "/"));
+}
+
 // src/lib/cache.ts
 import { DatabaseSync as DatabaseSync2 } from "node:sqlite";
-import { homedir as homedir2 } from "node:os";
-import { join as join2 } from "node:path";
+import { homedir as homedir3 } from "node:os";
+import { join as join3 } from "node:path";
 import { mkdirSync } from "node:fs";
 function tx(db, fn) {
   db.exec("BEGIN");
@@ -23595,8 +23880,8 @@ function tx(db, fn) {
     throw e;
   }
 }
-var CACHE_DIR = join2(homedir2(), ".claude", "library");
-var DB_PATH = join2(CACHE_DIR, "library.db");
+var CACHE_DIR = join3(homedir3(), ".claude", "library");
+var DB_PATH = join3(CACHE_DIR, "library.db");
 function ensureColumns(d, table, columns) {
   const existing = new Set(d.prepare(`PRAGMA table_info(${table})`).all().map((r) => r.name));
   for (const [name, ddl] of columns) {
@@ -23613,6 +23898,7 @@ function open() {
   mkdirSync(CACHE_DIR, { recursive: true });
   const db = new DatabaseSync2(DB_PATH);
   db.exec("PRAGMA journal_mode = WAL");
+  db.exec("PRAGMA busy_timeout = 15000");
   db.exec(`
     CREATE TABLE IF NOT EXISTS conversations (
       uuid TEXT PRIMARY KEY,
@@ -23669,6 +23955,16 @@ function open() {
     CREATE TABLE IF NOT EXISTS meta (
       key TEXT PRIMARY KEY,
       value TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS ingest_state (
+      source_path TEXT PRIMARY KEY,
+      mtime_ms INTEGER NOT NULL,
+      size INTEGER NOT NULL,
+      conversation_uuid TEXT,
+      message_count INTEGER NOT NULL DEFAULT 0,
+      redactions INTEGER NOT NULL DEFAULT 0,
+      ingested_at TEXT NOT NULL
     );
 
     CREATE TABLE IF NOT EXISTS project_docs (
@@ -23838,7 +24134,10 @@ function open() {
     ["current_leaf_uuid", "TEXT"],
     ["platform", "TEXT"],
     ["session_id", "TEXT"],
-    ["settings_json", "TEXT"]
+    ["settings_json", "TEXT"],
+    ["cwd", "TEXT"],
+    ["git_branch", "TEXT"],
+    ["source_path", "TEXT"]
   ]);
   ensureColumns(db, "messages", [
     ["parent_uuid", "TEXT"],
@@ -24063,6 +24362,86 @@ function upsertArtifacts(messageUuid, conversationUuid, createdAt, artifacts) {
 `).length, createdAt);
   });
 }
+var LOCAL_ORG = "local";
+var DELETE_TRIGGERS = `
+  CREATE TRIGGER IF NOT EXISTS messages_ad AFTER DELETE ON messages BEGIN
+    DELETE FROM messages_fts WHERE message_uuid = old.uuid;
+  END;
+  CREATE TRIGGER IF NOT EXISTS message_blocks_ad AFTER DELETE ON message_blocks BEGIN
+    DELETE FROM blocks_fts WHERE block_uuid = old.uuid;
+  END;`;
+function withoutDeleteTriggers(fn) {
+  db().exec("DROP TRIGGER IF EXISTS messages_ad; DROP TRIGGER IF EXISTS message_blocks_ad;");
+  try {
+    return fn();
+  } finally {
+    db().exec(DELETE_TRIGGERS);
+  }
+}
+function deleteMessagesWhere(clause, args) {
+  const selectUuids = `SELECT uuid FROM messages WHERE ${clause}`;
+  db().prepare(`DELETE FROM blocks_fts WHERE message_uuid IN (${selectUuids})`).run(...args);
+  db().prepare(`DELETE FROM message_blocks WHERE message_uuid IN (${selectUuids})`).run(...args);
+  db().prepare(`DELETE FROM messages_fts WHERE message_uuid IN (${selectUuids})`).run(...args);
+  db().prepare(`DELETE FROM messages WHERE ${clause}`).run(...args);
+}
+function clearCodeSessions() {
+  const codeConvos = "conversation_uuid IN (SELECT uuid FROM conversations WHERE platform = 'CLAUDE_CODE')";
+  tx(db(), () => {
+    withoutDeleteTriggers(() => deleteMessagesWhere(codeConvos, []));
+    db().prepare("DELETE FROM ingest_state").run();
+  });
+}
+function getIngestWatermarks() {
+  const rows = db().prepare("SELECT source_path, mtime_ms, size FROM ingest_state").all();
+  return new Map(rows.map((r) => [r.source_path, r]));
+}
+function upsertCodeSession(session, file2) {
+  const now = new Date().toISOString();
+  const projectUuid = `code:${session.projectDir}`;
+  tx(db(), () => {
+    db().prepare(`INSERT INTO projects (uuid, org_id, name, description, is_starred, created_at, updated_at, synced_at)
+         VALUES (?, ?, ?, NULL, 0, ?, ?, ?)
+         ON CONFLICT(uuid) DO UPDATE SET name=excluded.name, updated_at=excluded.updated_at, synced_at=excluded.synced_at`).run(projectUuid, LOCAL_ORG, projectNameFor(session.projectDir, session.cwd), session.createdAt, session.updatedAt, now);
+    db().prepare(`INSERT INTO conversations (uuid, org_id, name, summary, model, is_starred, project_uuid, created_at, updated_at,
+           synced_at, messages_synced, messages_synced_for, platform, session_id, cwd, git_branch, source_path)
+         VALUES (?, ?, ?, NULL, ?, 0, ?, ?, ?, ?, 1, ?, 'CLAUDE_CODE', ?, ?, ?, ?)
+         ON CONFLICT(uuid) DO UPDATE SET
+           name=excluded.name, model=excluded.model, project_uuid=excluded.project_uuid,
+           updated_at=excluded.updated_at, synced_at=excluded.synced_at,
+           messages_synced_for=excluded.messages_synced_for,
+           cwd=excluded.cwd, git_branch=excluded.git_branch, source_path=excluded.source_path`).run(session.uuid, LOCAL_ORG, session.name, session.version, projectUuid, session.createdAt, session.updatedAt, now, session.updatedAt, session.sessionId, session.cwd, session.gitBranch, file2.path);
+    const insMsg = db().prepare(`INSERT INTO messages (uuid, conversation_uuid, idx, sender, text, created_at, parent_uuid, input_mode, truncated)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)`);
+    const insBlock = db().prepare(`INSERT INTO message_blocks (uuid, message_uuid, position, type, text, tool_use_id, tool_name, tool_input_json, is_error)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)`);
+    withoutDeleteTriggers(() => deleteMessagesWhere("conversation_uuid = ?", [session.uuid]));
+    for (const m of session.messages) {
+      insMsg.run(m.uuid, session.uuid, m.idx, m.sender, m.text, m.createdAt, m.parentUuid, m.inputMode);
+      for (const b of m.blocks) {
+        insBlock.run(`${m.uuid}-${b.position}`, m.uuid, b.position, b.type, b.text, b.toolUseId, b.toolName, b.toolInputJson);
+      }
+    }
+    db().prepare(`INSERT INTO ingest_state (source_path, mtime_ms, size, conversation_uuid, message_count, redactions, ingested_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(source_path) DO UPDATE SET
+           mtime_ms=excluded.mtime_ms, size=excluded.size, conversation_uuid=excluded.conversation_uuid,
+           message_count=excluded.message_count, redactions=excluded.redactions, ingested_at=excluded.ingested_at`).run(file2.path, file2.mtimeMs, file2.size, session.uuid, session.messages.length, session.redactions, now);
+  });
+}
+function markIngestSkipped(file2) {
+  db().prepare(`INSERT INTO ingest_state (source_path, mtime_ms, size, conversation_uuid, message_count, redactions, ingested_at)
+       VALUES (?, ?, ?, NULL, 0, 0, ?)
+       ON CONFLICT(source_path) DO UPDATE SET mtime_ms=excluded.mtime_ms, size=excluded.size, ingested_at=excluded.ingested_at`).run(file2.path, file2.mtimeMs, file2.size, new Date().toISOString());
+}
+function codeStats() {
+  const c = db().prepare(`SELECT COUNT(*) AS sessions, MIN(created_at) AS oldest, MAX(updated_at) AS newest
+       FROM conversations WHERE platform = 'CLAUDE_CODE'`).get();
+  const m = db().prepare(`SELECT COUNT(*) AS n FROM messages
+       WHERE conversation_uuid IN (SELECT uuid FROM conversations WHERE platform = 'CLAUDE_CODE')`).get();
+  const r = db().prepare("SELECT COALESCE(SUM(redactions), 0) AS n FROM ingest_state").get();
+  return { sessions: c.sessions, messages: m.n, redactions: r.n, oldest: c.oldest, newest: c.newest };
+}
 function upsertMessageFiles(messageUuid, files) {
   const ins = db().prepare(`INSERT INTO message_files (uuid, message_uuid, file_kind, file_name, thumbnail_url, preview_url,
        primary_color, width, height, created_at)
@@ -24233,13 +24612,22 @@ function getMessages(convoUuid) {
          parent_uuid, input_mode, stop_reason, truncated, compaction_summary
        FROM messages WHERE conversation_uuid = ? ORDER BY idx ASC`).all(convoUuid);
 }
-function search(query, limit = 20) {
+function search(query, limit = 20, source) {
+  const where = ["messages_fts MATCH ?"];
+  const args = [query];
+  if (source === "code")
+    where.push("c.platform = 'CLAUDE_CODE'");
+  if (source === "chat")
+    where.push("(c.platform IS NULL OR c.platform <> 'CLAUDE_CODE')");
+  args.push(limit);
   return db().prepare(`SELECT
          f.conversation_uuid AS conversation_uuid,
          c.name AS conversation_name,
          c.is_starred AS conv_starred,
          f.message_uuid AS message_uuid,
          f.sender AS sender,
+         c.platform AS platform,
+         p.name AS project_name,
          snippet(messages_fts, 0, '«', '»', '…', 16) AS snippet,
          (bm25(messages_fts)
            - CASE WHEN c.is_starred=1 THEN 5.0 ELSE 0 END
@@ -24247,8 +24635,8 @@ function search(query, limit = 20) {
        FROM messages_fts f
        JOIN conversations c ON c.uuid = f.conversation_uuid
        LEFT JOIN projects p ON p.uuid = c.project_uuid
-       WHERE messages_fts MATCH ?
-       ORDER BY rank LIMIT ?`).all(query, limit);
+       WHERE ${where.join(" AND ")}
+       ORDER BY rank LIMIT ?`).all(...args);
 }
 function lastSyncedAt(orgId) {
   const where = orgId ? "WHERE org_id = ?" : "";
@@ -24397,6 +24785,14 @@ function fmtDate(iso) {
 function trim(s, n) {
   return s.length > n ? s.slice(0, n - 1) + "…" : s;
 }
+function sourceTag(platform) {
+  return platform === "CLAUDE_CODE" ? "code" : "chat";
+}
+function fmtMsgHit(h) {
+  const where = h.platform === "CLAUDE_CODE" && h.project_name ? `  ${trim(h.project_name, 34)}` : "";
+  return `[${sourceTag(h.platform)}/${h.sender}] ${trim(h.conversation_name, 50)}${h.conv_starred ? " ★" : ""}${where}` + `  (${h.conversation_uuid})
+  ${h.snippet}`;
+}
 function recordFailure(stats, where, err) {
   if (stats.failureSamples.length >= 5)
     return;
@@ -24512,9 +24908,30 @@ async function performSync(opts = {}) {
   const filter = opts.org?.toLowerCase();
   const targets = filter ? orgs.filter((o) => o.uuid === opts.org || o.name.toLowerCase().includes(filter)) : orgs;
   const results = [];
+  let synced = 0;
   for (const org of targets) {
-    results.push(await syncOrg(cookies, org, { full: Boolean(opts.full) }));
+    try {
+      results.push(await syncOrg(cookies, org, { full: Boolean(opts.full) }));
+      synced++;
+    } catch (err) {
+      if (!(err instanceof SessionExpiredError))
+        throw err;
+      results.push({
+        org: org.name,
+        newConvos: 0,
+        updatedConvos: 0,
+        unchangedConvos: 0,
+        failedConvos: 0,
+        newMessages: 0,
+        projects: 0,
+        docs: 0,
+        skipped: "no API access with this session (401)",
+        failureSamples: []
+      });
+    }
   }
+  if (targets.length > 0 && synced === 0)
+    throw new SessionExpiredError;
   setMeta("last_sync_completed_at", new Date().toISOString());
   return results;
 }
@@ -24564,7 +24981,7 @@ async function autoSyncIfStale() {
 }
 var sync = {
   name: "library_sync",
-  description: "Pull new and updated conversations from Claude Desktop. Incremental by default. Only fetches messages for conversations that changed since last sync. Captures regen branches and message tree (tree=True). Pass full=true to re-fetch everything.",
+  description: "Pull new and updated chats from Claude Desktop. Incremental by default. Only fetches messages for conversations that changed since last sync. Captures regen branches and message tree (tree=True). Orgs you have no API access to are reported as skipped. Pass full=true to re-fetch everything. For local Claude Code sessions use library_ingest.",
   inputSchema: {
     type: "object",
     properties: {
@@ -24583,9 +25000,83 @@ var sync = {
     return formatSyncReport(results);
   }
 };
+async function ingestCodeSessions(opts = {}) {
+  const report = {
+    scanned: 0,
+    ingested: 0,
+    skipped: 0,
+    empty: 0,
+    failed: 0,
+    messages: 0,
+    redactions: 0,
+    failureSamples: []
+  };
+  const files = opts.only ? (await discoverSessionFiles()).filter((f) => f.path === opts.only || f.path.endsWith(`/${opts.only}.jsonl`)) : await discoverSessionFiles();
+  if (opts.full && !opts.only)
+    clearCodeSessions();
+  const marks = opts.full ? new Map : getIngestWatermarks();
+  for (const file2 of files) {
+    report.scanned++;
+    const seen = marks.get(file2.path);
+    if (seen && seen.mtime_ms === file2.mtimeMs && seen.size === file2.size) {
+      report.skipped++;
+      continue;
+    }
+    try {
+      const session = await parseSessionFile(file2.path, file2.projectDir);
+      if (!session) {
+        markIngestSkipped(file2);
+        report.empty++;
+        continue;
+      }
+      upsertCodeSession(session, { path: file2.path, mtimeMs: file2.mtimeMs, size: file2.size });
+      report.ingested++;
+      report.messages += session.messages.length;
+      report.redactions += session.redactions;
+    } catch (err) {
+      report.failed++;
+      if (report.failureSamples.length < 5) {
+        const msg = err instanceof Error ? err.message : String(err);
+        report.failureSamples.push(`${basename2(file2.path)}: ${msg.slice(0, 200)}`);
+      }
+    }
+  }
+  setMeta("last_code_ingest_at", new Date().toISOString());
+  return report;
+}
+function formatIngestReport(r) {
+  const stats = codeStats();
+  const lines = [
+    `Ingested ${r.ingested} session${r.ingested === 1 ? "" : "s"} (${r.messages} messages, ${r.redactions} secrets redacted).`,
+    `  scanned ${r.scanned}, unchanged ${r.skipped}, no-content ${r.empty}${r.failed ? `, failed ${r.failed}` : ""}`,
+    `  library now holds ${stats.sessions} Claude Code sessions, ${stats.messages} messages` + (stats.oldest ? `, ${fmtDate(stats.oldest)} to ${fmtDate(stats.newest ?? stats.oldest)}` : "")
+  ];
+  for (const s of r.failureSamples)
+    lines.push(`  ! ${s}`);
+  return lines.join(`
+`);
+}
+var ingestCode = {
+  name: "library_ingest",
+  description: "Import local Claude Code sessions from ~/.claude/projects into the library, so they are searchable alongside Claude Desktop chats. Incremental: unchanged session files are skipped via an mtime/size watermark. Stores your typed prompts, assistant replies, reasoning and tool names only. Tool results, file contents and images are never stored, and known secret formats are redacted before writing. Safe to run repeatedly and from a hook.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      full: { type: "boolean", description: "Re-ingest every session file, ignoring watermarks. Default false." },
+      only: { type: "string", description: "Ingest a single session: full path to a .jsonl file, or a bare session id." }
+    }
+  },
+  handler: async (args) => {
+    const report = await ingestCodeSessions({
+      full: Boolean(args.full),
+      only: typeof args.only === "string" ? args.only : undefined
+    });
+    return formatIngestReport(report);
+  }
+};
 var list = {
   name: "library_list",
-  description: "List recent Claude Desktop conversations from the local cache, newest first. Auto-syncs if cache is older than 24 hours. Filter by project name or UUID.",
+  description: "List recent conversations from the local cache, newest first, across both Claude Desktop chats and Claude Code sessions. Auto-syncs if cache is older than 24 hours. Filter by project name or UUID.",
   inputSchema: {
     type: "object",
     properties: {
@@ -24622,7 +25113,7 @@ var list = {
 };
 var search2 = {
   name: "library_search",
-  description: "Search the local Claude Desktop library. The `kind` arg dispatches to one of several backends: messages, docs, memory, and artifacts use FTS5 (phrase quotes, AND/OR/NOT supported); citations use LIKE on title/url/site_name; tool_calls is exact-match on tool name; shares is substring match on snapshot_name. With `kind=all` (default), messages + docs + memory + artifacts are searched in parallel and merged. With `kind=memory` and no query, returns the snapshot history. Auto-syncs if cache is older than 24 hours.",
+  description: "Search the local library of Claude Desktop chats and Claude Code sessions. Message hits carry a source tag and can be narrowed with `source`. The `kind` arg dispatches to one of several backends: messages, docs, memory, and artifacts use FTS5 (phrase quotes, AND/OR/NOT supported); citations use LIKE on title/url/site_name; tool_calls is exact-match on tool name; shares is substring match on snapshot_name. With `kind=all` (default), messages + docs + memory + artifacts are searched in parallel and merged. With `kind=memory` and no query, returns the snapshot history. Auto-syncs if cache is older than 24 hours.",
   inputSchema: {
     type: "object",
     properties: {
@@ -24633,6 +25124,11 @@ var search2 = {
         type: "string",
         enum: ["all", "messages", "docs", "memory", "artifacts", "tool_calls", "citations", "shares"],
         description: 'Filter results to one source. Default "all".'
+      },
+      source: {
+        type: "string",
+        enum: ["all", "chat", "code"],
+        description: 'Restrict message hits to Claude Desktop chats ("chat") or Claude Code sessions ("code"). Default "all".'
       },
       noSync: { type: "boolean", description: "Skip the freshness auto-sync. Default false." }
     },
@@ -24645,13 +25141,13 @@ var search2 = {
     const note = args.noSync ? null : await autoSyncIfStale();
     const kind = typeof args.kind === "string" ? args.kind : "all";
     const limit = Number(args.limit ?? 20);
+    const source = args.source === "chat" || args.source === "code" ? args.source : undefined;
     if (kind === "messages") {
-      const hits = search(q, limit);
+      const hits = search(q, limit, source);
       if (hits.length === 0)
         return [note, `No message matches for "${q}".`].filter(Boolean).join(`
 `);
-      const body = hits.map((h) => `[${h.sender}] ${trim(h.conversation_name, 50)}${h.conv_starred ? " ★" : ""}  (${h.conversation_uuid})
-  ${h.snippet}`).join(`
+      const body = hits.map(fmtMsgHit).join(`
 
 `);
       return [note, `Messages (${hits.length}):
@@ -24764,7 +25260,7 @@ ${body}`].filter(Boolean).join(`
 
 `);
     }
-    const msgHits = search(q, limit);
+    const msgHits = search(q, limit, source);
     const docHits = searchDocs(q, Number(args.docLimit ?? 10));
     const memHits = searchMemory(q, 3);
     const artHits = searchArtifacts({ query: q, limit: 10 });
@@ -24775,8 +25271,7 @@ ${body}`].filter(Boolean).join(`
     const sections = [];
     if (msgHits.length > 0) {
       sections.push(`Messages (${msgHits.length}):
-` + msgHits.map((h) => `[${h.sender}] ${trim(h.conversation_name, 50)}${h.conv_starred ? " ★" : ""}  (${h.conversation_uuid})
-  ${h.snippet}`).join(`
+` + msgHits.map(fmtMsgHit).join(`
 
 `));
     }
@@ -24917,7 +25412,7 @@ conversation_uuid: ${convo}${idx}`;
 };
 var projects = {
   name: "library_projects",
-  description: "List Claude Desktop projects with conversation counts. Pass name= to filter to one project. Add detail=true to return the full record including system prompt.",
+  description: "List projects with conversation counts: Claude Desktop projects and one entry per Claude Code working directory. Pass name= to filter to one project. Add detail=true to return the full record including system prompt.",
   inputSchema: {
     type: "object",
     properties: {
@@ -24991,7 +25486,7 @@ var projects = {
 };
 var status = {
   name: "library_status",
-  description: "Report cache state: total conversations, last sync time, and a quick auth check against Claude Desktop cookies.",
+  description: "Report cache state: conversation, project and doc counts, last sync and ingest times, and a check that Claude Desktop cookies can be read. The cookie check does not prove the session is still valid server-side.",
   inputSchema: { type: "object", properties: {} },
   handler: async () => {
     let auth = "ok";
@@ -25024,11 +25519,11 @@ var status = {
 `);
   }
 };
-var tools = [sync, list, search2, outline, open2, projects, status];
+var tools = [sync, ingestCode, list, search2, outline, open2, projects, status];
 
 // src/server.ts
 async function main() {
-  const server = new Server({ name: "library", version: "0.2.4" }, { capabilities: { tools: {} } });
+  const server = new Server({ name: "library", version: "0.3.0" }, { capabilities: { tools: {} } });
   const byName = new Map(tools.map((t) => [t.name, t]));
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
     tools: tools.map((t) => ({

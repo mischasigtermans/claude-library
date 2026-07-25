@@ -1,10 +1,10 @@
 {
   "name": "library",
-  "version": "0.2.4",
-  "description": "Local searchable mirror of your Claude chats, readable from any Claude Code session.",
+  "version": "0.3.0",
+  "description": "Local searchable mirror of everything you have worked through with Claude, readable from any Claude Code session.",
   "author": { "name": "Mischa Sigtermans" },
   "homepage": "https://github.com/mischasigtermans/claude-library",
   "repository": "https://github.com/mischasigtermans/claude-library",
   "license": "MIT",
-  "keywords": ["mcp", "claude-desktop", "library", "search", "memory", "artifacts"]
+  "keywords": ["mcp", "claude-desktop", "claude-code", "library", "search", "memory", "artifacts"]
 }
