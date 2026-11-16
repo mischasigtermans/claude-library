@@ -31,12 +31,13 @@ Code sessions are pruned after 30 days by default. Ingesting them is also how yo
 
 First sync pulls every conversation, project, doc, memory snapshot, and share into `~/.claude/library/library.db`. After that, sync is incremental. Search hits return ranked snippets across messages, project knowledge-base docs, your memory text, and extracted code artifacts. Drill into any result with `/library open <uuid>`.
 
-Claude Code sessions ingest automatically at the start and end of every session; `/library ingest` pulls them in on demand. Hits are tagged `[code/…]` or `[chat/…]`, and `source=code` or `source=chat` narrows a search to one of them.
+Claude Code sessions ingest automatically at the start and end of every session; `/library ingest` pulls them in on demand. Hits are tagged `[code/…]` or `[chat/…]`, and `source=code` or `source=chat` narrows a search to one of them. Message hits show the day they were written. `project=`, `before=` and `sender=` narrow them further: `project=~/Sites/app before=2026-11-02 sender=human` finds what you typed in that repo before 2 November 2026.
 
 ## Features
 
 - Full-text search (FTS5) across conversation messages, project knowledge-base docs, memory snapshots, and assistant-generated code artifacts.
 - Local Claude Code sessions indexed alongside chats, grouped by working directory, filterable with `source=`.
+- Message filters: `project=` for one project or Claude Code working directory, `before=` for a date, `sender=` for `human` or `assistant`. Each message hit shows the day it was written.
 - Filtered search per source via `kind=`: messages, docs, memory, artifacts, tool_calls, citations, shares.
 - Branch-aware sync: captures regen branches via the conversation tree, not just the active leaf.
 - Project view with `prompt_template` (system prompt) per project plus knowledge-base docs and files.

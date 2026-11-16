@@ -23,6 +23,7 @@ import {
   getIngestWatermarks,
   markIngestSkipped,
   upsertCodeSession,
+  type MessageFilters,
   type SearchHit,
   getConversationFreshness,
   getDoc,
@@ -77,11 +78,33 @@ function sourceTag(platform: string | null | undefined): string {
 }
 
 function fmtMsgHit(h: SearchHit): string {
-  const where = h.platform === 'CLAUDE_CODE' && h.project_name ? `  ${trim(h.project_name, 34)}` : '';
+  // Untrimmed: a caller passes this name back as `project`.
+  const where = h.platform === 'CLAUDE_CODE' && h.project_name ? `  ${h.project_name}` : '';
   return (
-    `[${sourceTag(h.platform)}/${h.sender}] ${trim(h.conversation_name, 50)}${h.conv_starred ? ' ★' : ''}${where}` +
-    `  (${h.conversation_uuid})\n  ${h.snippet}`
+    `[${sourceTag(h.platform)}/${h.sender}] ${trim(h.conversation_name, 50)}${h.conv_starred ? ' ★' : ''}` +
+    `  ${fmtDate(h.created_at).slice(0, 10)}${where}  (${h.conversation_uuid})\n  ${h.snippet}`
   );
+}
+
+function parseSender(value: unknown): MessageFilters['sender'] {
+  if (value == null || value === 'all') return undefined;
+  if (value === 'human' || value === 'assistant') return value;
+  throw new Error(`sender must be "all", "human" or "assistant". Got "${value}".`);
+}
+
+const ISO_BEFORE = /^(\d{4}-\d{2}-\d{2})(?:[T ](\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?)(Z|[+-]\d{2}:\d{2})?)?$/;
+
+function parseBefore(value: unknown): string | undefined {
+  if (value == null) return undefined;
+  const m = ISO_BEFORE.exec(String(value).trim());
+  if (m) {
+    const [, day, time = '00:00', offset = 'Z'] = m;
+    const at = new Date(`${day}T${time}${offset}`);
+    // JS rolls 2026-02-30 over to March instead of refusing it.
+    const realDay = new Date(`${day}T00:00Z`).toJSON()?.startsWith(day);
+    if (realDay && !Number.isNaN(at.getTime())) return at.toISOString();
+  }
+  throw new Error(`before must be an ISO date or datetime, such as 2026-11-02 or 2026-11-02T09:30:00Z. Got "${value}".`);
 }
 
 interface SyncStats {
@@ -440,7 +463,7 @@ const list: Tool = {
 const search: Tool = {
   name: 'library_search',
   description:
-    'Search the local library of Claude Desktop chats and Claude Code sessions. Message hits carry a source tag and can be narrowed with `source`. The `kind` arg dispatches to one of several backends: messages, docs, memory, and artifacts use FTS5 (phrase quotes, AND/OR/NOT supported); citations use LIKE on title/url/site_name; tool_calls is exact-match on tool name; shares is substring match on snapshot_name. With `kind=all` (default), messages + docs + memory + artifacts are searched in parallel and merged. With `kind=memory` and no query, returns the snapshot history. Auto-syncs if cache is older than 24 hours.',
+    'Search the local library of Claude Desktop chats and Claude Code sessions. Message hits carry a source tag, the sender and the day the message was written, and can be narrowed with `source`, `project`, `before` and `sender`. These four apply to message hits only: they combine with each other, and with `kind=all` they narrow the message part and leave docs, memory and artifacts as they are. An unknown `sender` or an unparseable `before` is an error that names the accepted form. The `kind` arg dispatches to one of several backends: messages, docs, memory, and artifacts use FTS5 (phrase quotes, AND/OR/NOT supported); citations use LIKE on title/url/site_name; tool_calls is exact-match on tool name; shares is substring match on snapshot_name. With `kind=all` (default), messages + docs + memory + artifacts are searched in parallel and merged. With `kind=memory` and no query, returns the snapshot history. Auto-syncs if cache is older than 24 hours.',
   inputSchema: {
     type: 'object',
     properties: {
@@ -457,6 +480,21 @@ const search: Tool = {
         enum: ['all', 'chat', 'code'],
         description: 'Restrict message hits to Claude Desktop chats ("chat") or Claude Code sessions ("code"). Default "all".',
       },
+      project: {
+        type: 'string',
+        description:
+          'Restrict message hits to one project, by name or UUID, resolved as in library_list. For a Claude Code session the name is its working directory as hits print it, such as "~/Sites/app". A project nothing matches answers "No project matches".',
+      },
+      before: {
+        type: 'string',
+        description:
+          'ISO date or datetime, such as "2026-11-02" or "2026-11-02T09:30:00Z". Only message hits created before it. A bare date means the start of that day. Without an offset the time is UTC, as the dates on hits are.',
+      },
+      sender: {
+        type: 'string',
+        enum: ['all', 'human', 'assistant'],
+        description: 'Restrict message hits to what the user wrote ("human") or what Claude replied ("assistant"). Default "all".',
+      },
       noSync: { type: 'boolean', description: 'Skip the freshness auto-sync. Default false.' },
     },
     required: ['query'],
@@ -464,13 +502,23 @@ const search: Tool = {
   handler: async (args) => {
     const q = String(args.query ?? '');
     if (!q.trim()) throw new Error('query is required');
+    const filters: MessageFilters = {
+      source: args.source === 'chat' || args.source === 'code' ? args.source : undefined,
+      before: parseBefore(args.before),
+      sender: parseSender(args.sender),
+    };
     const note = args.noSync ? null : await autoSyncIfStale();
     const kind = typeof args.kind === 'string' ? args.kind : 'all';
     const limit = Number(args.limit ?? 20);
-    const source = args.source === 'chat' || args.source === 'code' ? args.source : undefined;
+
+    if ((kind === 'messages' || kind === 'all') && typeof args.project === 'string') {
+      const p = findProjectByName(args.project);
+      if (!p) return `No project matches "${args.project}". Try library_projects to list them.`;
+      filters.projectUuid = p.uuid;
+    }
 
     if (kind === 'messages') {
-      const hits = searchCache(q, limit, source);
+      const hits = searchCache(q, limit, filters);
       if (hits.length === 0) return [note, `No message matches for "${q}".`].filter(Boolean).join('\n');
       const body = hits.map(fmtMsgHit).join('\n\n');
       return [note, `Messages (${hits.length}):\n${body}`].filter(Boolean).join('\n\n');
@@ -567,7 +615,7 @@ const search: Tool = {
     }
 
     // kind === 'all'
-    const msgHits = searchCache(q, limit, source);
+    const msgHits = searchCache(q, limit, filters);
     const docHits = searchDocs(q, Number(args.docLimit ?? 10));
     const memHits = searchMemory(q, 3);
     const artHits = searchArtifacts({ query: q, limit: 10 });

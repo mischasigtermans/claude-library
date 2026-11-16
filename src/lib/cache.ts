@@ -1,6 +1,6 @@
 import { DatabaseSync } from 'node:sqlite';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { mkdirSync } from 'node:fs';
 
 function tx<T>(db: DatabaseSync, fn: () => T): T {
@@ -28,8 +28,10 @@ import type {
   Share,
 } from './api.js';
 
-const CACHE_DIR = join(homedir(), '.claude', 'library');
-const DB_PATH = join(CACHE_DIR, 'library.db');
+// Read when the database opens, not at import, so a test run can point it at a temp file.
+function dbPath(): string {
+  return process.env.LIBRARY_DB || join(homedir(), '.claude', 'library', 'library.db');
+}
 
 function ensureColumns(
   d: DatabaseSync,
@@ -57,8 +59,9 @@ function replaceChildren<T>(
 }
 
 function open(): DatabaseSync {
-  mkdirSync(CACHE_DIR, { recursive: true });
-  const db = new DatabaseSync(DB_PATH);
+  const path = dbPath();
+  mkdirSync(dirname(path), { recursive: true });
+  const db = new DatabaseSync(path);
   db.exec('PRAGMA journal_mode = WAL');
   // The MCP server and the hook-driven ingest CLI are separate processes on one file.
   // SQLite defaults to failing a busy write immediately; wait for the other writer instead.
@@ -1085,15 +1088,37 @@ export interface SearchHit {
   sender: string;
   platform: string | null;
   project_name: string | null;
+  created_at: string;
   snippet: string;
   rank: number;
 }
 
-export function search(query: string, limit = 20, source?: 'chat' | 'code'): SearchHit[] {
+export interface MessageFilters {
+  source?: 'chat' | 'code';
+  projectUuid?: string;
+  /** ISO datetime with an offset. */
+  before?: string;
+  sender?: 'human' | 'assistant';
+}
+
+export function search(query: string, limit = 20, filters: MessageFilters = {}): SearchHit[] {
   const where = ['messages_fts MATCH ?'];
   const args: unknown[] = [query];
-  if (source === 'code') where.push("c.platform = 'CLAUDE_CODE'");
-  if (source === 'chat') where.push("(c.platform IS NULL OR c.platform <> 'CLAUDE_CODE')");
+  if (filters.source === 'code') where.push("c.platform = 'CLAUDE_CODE'");
+  if (filters.source === 'chat') where.push("(c.platform IS NULL OR c.platform <> 'CLAUDE_CODE')");
+  if (filters.projectUuid) {
+    where.push('c.project_uuid = ?');
+    args.push(filters.projectUuid);
+  }
+  if (filters.before) {
+    // Chats and Claude Code sessions need not share a fraction or offset, so compare instants, not strings.
+    where.push('julianday(m.created_at) < julianday(?)');
+    args.push(filters.before);
+  }
+  if (filters.sender) {
+    where.push('f.sender = ?');
+    args.push(filters.sender);
+  }
   args.push(limit);
   return db()
     .prepare(
@@ -1105,11 +1130,13 @@ export function search(query: string, limit = 20, source?: 'chat' | 'code'): Sea
          f.sender AS sender,
          c.platform AS platform,
          p.name AS project_name,
+         m.created_at AS created_at,
          snippet(messages_fts, 0, '«', '»', '…', 16) AS snippet,
          (bm25(messages_fts)
            - CASE WHEN c.is_starred=1 THEN 5.0 ELSE 0 END
            - CASE WHEN p.is_starred=1 THEN 2.0 ELSE 0 END) AS rank
        FROM messages_fts f
+       JOIN messages m ON m.uuid = f.message_uuid
        JOIN conversations c ON c.uuid = f.conversation_uuid
        LEFT JOIN projects p ON p.uuid = c.project_uuid
        WHERE ${where.join(' AND ')}

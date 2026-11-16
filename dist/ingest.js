@@ -14789,7 +14789,7 @@ function projectNameFor(projectDir, cwd) {
 // src/lib/cache.ts
 import { DatabaseSync } from "node:sqlite";
 import { homedir as homedir3 } from "node:os";
-import { join as join3 } from "node:path";
+import { dirname, join as join3 } from "node:path";
 import { mkdirSync } from "node:fs";
 function tx(db, fn) {
   db.exec("BEGIN");
@@ -14802,8 +14802,9 @@ function tx(db, fn) {
     throw e;
   }
 }
-var CACHE_DIR = join3(homedir3(), ".claude", "library");
-var DB_PATH = join3(CACHE_DIR, "library.db");
+function dbPath() {
+  return process.env.LIBRARY_DB || join3(homedir3(), ".claude", "library", "library.db");
+}
 function ensureColumns(d, table, columns) {
   const existing = new Set(d.prepare(`PRAGMA table_info(${table})`).all().map((r) => r.name));
   for (const [name, ddl] of columns) {
@@ -14812,8 +14813,9 @@ function ensureColumns(d, table, columns) {
   }
 }
 function open() {
-  mkdirSync(CACHE_DIR, { recursive: true });
-  const db = new DatabaseSync(DB_PATH);
+  const path = dbPath();
+  mkdirSync(dirname(path), { recursive: true });
+  const db = new DatabaseSync(path);
   db.exec("PRAGMA journal_mode = WAL");
   db.exec("PRAGMA busy_timeout = 15000");
   db.exec(`

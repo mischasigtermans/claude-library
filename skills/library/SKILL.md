@@ -33,7 +33,7 @@ Don't fire for things obviously about the *current* session, which you can alrea
 Default loop when the user wants to recall something from past chats.
 
 1. **Search first.** Call `library_search` with a tight query. 2-4 keywords, FTS5 syntax. Don't dump the whole user query in.
-2. **Read the snippets.** Pick the most relevant 1-3 hits. Hits come in sections: `[chat/human]`, `[chat/assistant]`, `[code/human]` and `[code/assistant]` from messages, `[doc]` from project knowledge-base files, `[memory #N]` from memory snapshots, `[artifact]` from code blocks. Code hits also show their working directory.
+2. **Read the snippets.** Pick the most relevant 1-3 hits. Hits come in sections: `[chat/human]`, `[chat/assistant]`, `[code/human]` and `[code/assistant]` from messages, `[doc]` from project knowledge-base files, `[memory #N]` from memory snapshots, `[artifact]` from code blocks. A message hit shows the day its message was written after the title. Code hits also show their working directory.
 3. **Drill in.** For any hit with a UUID, call `library_open <uuid>` to read the full item. For conversations, call `library_outline` first, then `library_open` with `from`/`to` bounds.
 4. **Pull only what's needed.** Don't fetch the full transcript when 5 messages will do.
 5. **Answer the user.** Quote the relevant passage. Cite the conversation title or doc filename, plus date.
@@ -48,6 +48,18 @@ If `library_search` returns nothing, call `library_list` to see what's cached. T
 - `source=code` when the user is recalling work: when a file changed, which command they ran, what broke in a repo.
 
 Code sessions hold what the user typed and what Claude replied. They never hold file contents or command output, so don't expect to recover a diff or a stack trace from them. Read the repo for that.
+
+### Narrowing message hits
+
+Three more filters apply to message hits only, as `source=` does. They combine with each other and with `source=`. Under `kind=all` they narrow the message part and leave docs, memory and artifacts as they are.
+
+- `project=` takes a project name or UUID, resolved the way `library_list`'s `project` is. For a Claude Code session the name is its working directory as hits print it, such as `~/Sites/app`. A project nothing matches answers `No project matches`: call `library_projects` for the names.
+- `before=` takes an ISO date or datetime and keeps only messages created before it. A bare date means the start of that day. A time without an offset is UTC, as the dates on hits are.
+- `sender=` is `all` (default), `human` for what the user wrote, or `assistant` for what Claude replied.
+
+What the user typed in one repo before a given day is one call: `project=~/Sites/app before=2026-11-02 sender=human source=code`.
+
+An unknown `sender` or an unparseable `before` is an error that names the accepted form.
 
 ### Language-aware querying
 
@@ -91,9 +103,9 @@ Pulls Claude Code sessions from `~/.claude/projects`. This runs on its own at th
 
 Call `library_list` with `limit` and optional `project`. Default limit 25. Print the table.
 
-### `search <query> [--kind KIND] [--source SOURCE]`
+### `search <query> [--kind KIND] [--source SOURCE] [--project NAME] [--before DATE] [--sender SENDER]`
 
-Call `library_search` with the query. Optionally pass `source` (`all`, `chat`, `code`) to restrict message hits to one origin, and `kind` to restrict to one backend:
+Call `library_search` with the query. Optionally pass `source` (`all`, `chat`, `code`) to restrict message hits to one origin, `project` (a project name or UUID), `before` (an ISO date or datetime) and `sender` (`all`, `human`, `assistant`) to narrow them further, and `kind` to restrict to one backend:
 
 - `all` (default): messages, docs, memory, artifacts
 - `messages`: conversation message bodies only
@@ -125,6 +137,7 @@ Common moves:
   library list                   show cached conversations
   library search <query>         full-text search across messages, docs, memory, artifacts
   library search <query> kind=X  restrict to one source (messages/docs/memory/artifacts/tool_calls/citations/shares)
+  library search <query> project=X before=DATE sender=human  narrow message hits
   library projects               list projects with conversation counts
   library projects name=X detail=true  full project record including system prompt
   library outline <uuid>         turn-by-turn outline of one conversation

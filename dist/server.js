@@ -23867,7 +23867,7 @@ function projectNameFor(projectDir, cwd) {
 // src/lib/cache.ts
 import { DatabaseSync as DatabaseSync2 } from "node:sqlite";
 import { homedir as homedir3 } from "node:os";
-import { join as join3 } from "node:path";
+import { dirname, join as join3 } from "node:path";
 import { mkdirSync } from "node:fs";
 function tx(db, fn) {
   db.exec("BEGIN");
@@ -23880,8 +23880,9 @@ function tx(db, fn) {
     throw e;
   }
 }
-var CACHE_DIR = join3(homedir3(), ".claude", "library");
-var DB_PATH = join3(CACHE_DIR, "library.db");
+function dbPath() {
+  return process.env.LIBRARY_DB || join3(homedir3(), ".claude", "library", "library.db");
+}
 function ensureColumns(d, table, columns) {
   const existing = new Set(d.prepare(`PRAGMA table_info(${table})`).all().map((r) => r.name));
   for (const [name, ddl] of columns) {
@@ -23895,8 +23896,9 @@ function replaceChildren(d, table, parentCol, parentId, rows, inserter) {
     inserter(row);
 }
 function open() {
-  mkdirSync(CACHE_DIR, { recursive: true });
-  const db = new DatabaseSync2(DB_PATH);
+  const path = dbPath();
+  mkdirSync(dirname(path), { recursive: true });
+  const db = new DatabaseSync2(path);
   db.exec("PRAGMA journal_mode = WAL");
   db.exec("PRAGMA busy_timeout = 15000");
   db.exec(`
@@ -24612,13 +24614,25 @@ function getMessages(convoUuid) {
          parent_uuid, input_mode, stop_reason, truncated, compaction_summary
        FROM messages WHERE conversation_uuid = ? ORDER BY idx ASC`).all(convoUuid);
 }
-function search(query, limit = 20, source) {
+function search(query, limit = 20, filters = {}) {
   const where = ["messages_fts MATCH ?"];
   const args = [query];
-  if (source === "code")
+  if (filters.source === "code")
     where.push("c.platform = 'CLAUDE_CODE'");
-  if (source === "chat")
+  if (filters.source === "chat")
     where.push("(c.platform IS NULL OR c.platform <> 'CLAUDE_CODE')");
+  if (filters.projectUuid) {
+    where.push("c.project_uuid = ?");
+    args.push(filters.projectUuid);
+  }
+  if (filters.before) {
+    where.push("julianday(m.created_at) < julianday(?)");
+    args.push(filters.before);
+  }
+  if (filters.sender) {
+    where.push("f.sender = ?");
+    args.push(filters.sender);
+  }
   args.push(limit);
   return db().prepare(`SELECT
          f.conversation_uuid AS conversation_uuid,
@@ -24628,11 +24642,13 @@ function search(query, limit = 20, source) {
          f.sender AS sender,
          c.platform AS platform,
          p.name AS project_name,
+         m.created_at AS created_at,
          snippet(messages_fts, 0, '«', '»', '…', 16) AS snippet,
          (bm25(messages_fts)
            - CASE WHEN c.is_starred=1 THEN 5.0 ELSE 0 END
            - CASE WHEN p.is_starred=1 THEN 2.0 ELSE 0 END) AS rank
        FROM messages_fts f
+       JOIN messages m ON m.uuid = f.message_uuid
        JOIN conversations c ON c.uuid = f.conversation_uuid
        LEFT JOIN projects p ON p.uuid = c.project_uuid
        WHERE ${where.join(" AND ")}
@@ -24789,9 +24805,30 @@ function sourceTag(platform) {
   return platform === "CLAUDE_CODE" ? "code" : "chat";
 }
 function fmtMsgHit(h) {
-  const where = h.platform === "CLAUDE_CODE" && h.project_name ? `  ${trim(h.project_name, 34)}` : "";
-  return `[${sourceTag(h.platform)}/${h.sender}] ${trim(h.conversation_name, 50)}${h.conv_starred ? " ★" : ""}${where}` + `  (${h.conversation_uuid})
+  const where = h.platform === "CLAUDE_CODE" && h.project_name ? `  ${h.project_name}` : "";
+  return `[${sourceTag(h.platform)}/${h.sender}] ${trim(h.conversation_name, 50)}${h.conv_starred ? " ★" : ""}` + `  ${fmtDate(h.created_at).slice(0, 10)}${where}  (${h.conversation_uuid})
   ${h.snippet}`;
+}
+function parseSender(value) {
+  if (value == null || value === "all")
+    return;
+  if (value === "human" || value === "assistant")
+    return value;
+  throw new Error(`sender must be "all", "human" or "assistant". Got "${value}".`);
+}
+var ISO_BEFORE = /^(\d{4}-\d{2}-\d{2})(?:[T ](\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?)(Z|[+-]\d{2}:\d{2})?)?$/;
+function parseBefore(value) {
+  if (value == null)
+    return;
+  const m = ISO_BEFORE.exec(String(value).trim());
+  if (m) {
+    const [, day, time3 = "00:00", offset = "Z"] = m;
+    const at = new Date(`${day}T${time3}${offset}`);
+    const realDay = new Date(`${day}T00:00Z`).toJSON()?.startsWith(day);
+    if (realDay && !Number.isNaN(at.getTime()))
+      return at.toISOString();
+  }
+  throw new Error(`before must be an ISO date or datetime, such as 2026-11-02 or 2026-11-02T09:30:00Z. Got "${value}".`);
 }
 function recordFailure(stats, where, err) {
   if (stats.failureSamples.length >= 5)
@@ -25113,7 +25150,7 @@ var list = {
 };
 var search2 = {
   name: "library_search",
-  description: "Search the local library of Claude Desktop chats and Claude Code sessions. Message hits carry a source tag and can be narrowed with `source`. The `kind` arg dispatches to one of several backends: messages, docs, memory, and artifacts use FTS5 (phrase quotes, AND/OR/NOT supported); citations use LIKE on title/url/site_name; tool_calls is exact-match on tool name; shares is substring match on snapshot_name. With `kind=all` (default), messages + docs + memory + artifacts are searched in parallel and merged. With `kind=memory` and no query, returns the snapshot history. Auto-syncs if cache is older than 24 hours.",
+  description: "Search the local library of Claude Desktop chats and Claude Code sessions. Message hits carry a source tag, the sender and the day the message was written, and can be narrowed with `source`, `project`, `before` and `sender`. These four apply to message hits only: they combine with each other, and with `kind=all` they narrow the message part and leave docs, memory and artifacts as they are. An unknown `sender` or an unparseable `before` is an error that names the accepted form. The `kind` arg dispatches to one of several backends: messages, docs, memory, and artifacts use FTS5 (phrase quotes, AND/OR/NOT supported); citations use LIKE on title/url/site_name; tool_calls is exact-match on tool name; shares is substring match on snapshot_name. With `kind=all` (default), messages + docs + memory + artifacts are searched in parallel and merged. With `kind=memory` and no query, returns the snapshot history. Auto-syncs if cache is older than 24 hours.",
   inputSchema: {
     type: "object",
     properties: {
@@ -25130,6 +25167,19 @@ var search2 = {
         enum: ["all", "chat", "code"],
         description: 'Restrict message hits to Claude Desktop chats ("chat") or Claude Code sessions ("code"). Default "all".'
       },
+      project: {
+        type: "string",
+        description: 'Restrict message hits to one project, by name or UUID, resolved as in library_list. For a Claude Code session the name is its working directory as hits print it, such as "~/Sites/app". A project nothing matches answers "No project matches".'
+      },
+      before: {
+        type: "string",
+        description: 'ISO date or datetime, such as "2026-11-02" or "2026-11-02T09:30:00Z". Only message hits created before it. A bare date means the start of that day. Without an offset the time is UTC, as the dates on hits are.'
+      },
+      sender: {
+        type: "string",
+        enum: ["all", "human", "assistant"],
+        description: 'Restrict message hits to what the user wrote ("human") or what Claude replied ("assistant"). Default "all".'
+      },
       noSync: { type: "boolean", description: "Skip the freshness auto-sync. Default false." }
     },
     required: ["query"]
@@ -25138,12 +25188,22 @@ var search2 = {
     const q = String(args.query ?? "");
     if (!q.trim())
       throw new Error("query is required");
+    const filters = {
+      source: args.source === "chat" || args.source === "code" ? args.source : undefined,
+      before: parseBefore(args.before),
+      sender: parseSender(args.sender)
+    };
     const note = args.noSync ? null : await autoSyncIfStale();
     const kind = typeof args.kind === "string" ? args.kind : "all";
     const limit = Number(args.limit ?? 20);
-    const source = args.source === "chat" || args.source === "code" ? args.source : undefined;
+    if ((kind === "messages" || kind === "all") && typeof args.project === "string") {
+      const p = findProjectByName(args.project);
+      if (!p)
+        return `No project matches "${args.project}". Try library_projects to list them.`;
+      filters.projectUuid = p.uuid;
+    }
     if (kind === "messages") {
-      const hits = search(q, limit, source);
+      const hits = search(q, limit, filters);
       if (hits.length === 0)
         return [note, `No message matches for "${q}".`].filter(Boolean).join(`
 `);
@@ -25260,7 +25320,7 @@ ${body}`].filter(Boolean).join(`
 
 `);
     }
-    const msgHits = search(q, limit, source);
+    const msgHits = search(q, limit, filters);
     const docHits = searchDocs(q, Number(args.docLimit ?? 10));
     const memHits = searchMemory(q, 3);
     const artHits = searchArtifacts({ query: q, limit: 10 });
@@ -25523,7 +25583,7 @@ var tools = [sync, ingestCode, list, search2, outline, open2, projects, status];
 
 // src/server.ts
 async function main() {
-  const server = new Server({ name: "library", version: "0.3.0" }, { capabilities: { tools: {} } });
+  const server = new Server({ name: "library", version: "0.3.1" }, { capabilities: { tools: {} } });
   const byName = new Map(tools.map((t) => [t.name, t]));
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
     tools: tools.map((t) => ({

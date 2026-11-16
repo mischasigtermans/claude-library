@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.3.1] - 2026-11-16
+
+**Added**
+- `project=` on `library_search` narrows message hits to one project. It takes a name or UUID and resolves the way `library_list`'s `project` does. For a Claude Code session the name is its working directory, such as `~/Sites/app`.
+- `before=` on `library_search` keeps message hits created before an ISO date or datetime. A bare date is the start of that day, and a time without an offset is UTC. An unparseable value is an error that names the accepted form.
+- `sender=` on `library_search` narrows message hits to `human` or `assistant`. `all`, the default, keeps both. Any other value is an error that names the accepted ones.
+- The three filters combine with each other and with `source=`. Under `kind=all` they narrow the message part only.
+- A message hit prints the day its message was written, after the title.
+- `LIBRARY_DB` points the cache at another database file. The test suite sets it to a temp folder, so no test opens the live index.
+
+**Changed**
+- A code hit prints its working directory in full, so it can be passed back as `project=`. v0.3.0 cut it at 34 characters.
+
 ## [0.3.0] - 2026-07-25
 
 Library stops being a Claude Desktop mirror and becomes an index of everything you have worked through with Claude. Local Claude Code sessions are a second source alongside chats, so one search covers the thinking you did in a chat and the work you did in the terminal. Because Claude Code prunes session transcripts after 30 days, ingesting them is also how you keep them.
